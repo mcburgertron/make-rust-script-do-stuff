@@ -1,0 +1,18 @@
+# ─────────── EOL normalization ───────────
+*               text=auto
+
+# Force LF for code, including executable Rust scripts…
+*.rs            text eol=lf
+*.ers           text eol=lf
+*.sh            text eol=lf
+*.toml          text eol=lf
+*.md            text eol=lf
+
+# …but allow CRLF on Windows for PowerShell
+*.ps1           text eol=crlf
+
+# Binary files
+*.png           binary
+*.jpg           binary
+*.exe           binary
+*.dll           binary

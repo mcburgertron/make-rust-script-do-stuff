@@ -1,0 +1,116 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! clap = { version = "4", features = ["derive"] }
+//! serde = { version = "1", features = ["derive"] }
+//! serde_json = "1"
+//! walkdir = "2"
+//! globset = "0.4"
+//! ```
+
+
+/**
+Usage:
+    rust-script gci.ers [--path <PATH>] [--depth <DEPTH>] [--filter <PATTERN>] [--hidden]
+
+After associating the `.ers` extension on Windows or marking the file executable
+on Unix, you can run it directly:
+
+    ./gci.ers [options]
+
+Options:
+    --path      Directory to search. Defaults to current directory.
+    --depth     Maximum recursion depth. Defaults to unlimited.
+    --filter    Glob pattern filter applied to file names.
+    --hidden    Include hidden files and folders.
+*/
+
+use clap::Parser;
+use serde::Serialize;
+use std::path::{PathBuf};
+use walkdir::{WalkDir, DirEntry};
+use globset::{Glob, GlobSet};
+
+#[derive(Parser, Debug)]
+#[command(version, about = "List files in a directory as JSON")] 
+struct Args {
+    /// Directory to search
+    #[arg(long, default_value = ".")]
+    path: PathBuf,
+
+    /// Maximum recursion depth (unlimited by default)
+    #[arg(long, default_value_t = usize::MAX)]
+    depth: usize,
+
+    /// Glob pattern filter
+    #[arg(long)]
+    filter: Option<String>,
+
+    /// Include hidden files and directories
+    #[arg(long)]
+    hidden: bool,
+}
+
+#[derive(Serialize)]
+struct Entry {
+    path: String,
+    is_dir: bool,
+}
+
+fn build_glob(pattern: &Option<String>) -> Option<GlobSet> {
+    pattern.as_ref().map(|pat| {
+        let glob = Glob::new(pat).expect("invalid glob pattern");
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(glob);
+        builder.build().expect("failed to build glob")
+    })
+}
+
+#[cfg(unix)]
+fn is_hidden(entry: &DirEntry) -> bool {
+    entry.file_name().to_str().map_or(false, |s| s.starts_with('.'))
+}
+
+#[cfg(windows)]
+fn is_hidden(entry: &DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    if let Ok(md) = entry.metadata() {
+        if md.file_attributes() & 0x2 != 0 {
+            return true;
+        }
+    }
+    entry.file_name().to_str().map_or(false, |s| s.starts_with('.'))
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    let glob = build_glob(&args.filter);
+    let mut items = Vec::new();
+
+    for entry in WalkDir::new(&args.path).max_depth(args.depth) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("{}", err);
+                continue;
+            }
+        };
+        if !args.hidden && is_hidden(&entry) {
+            continue;
+        }
+        if let Some(ref set) = glob {
+            if !set.is_match(entry.file_name()) {
+                continue;
+            }
+        }
+        items.push(Entry {
+            path: entry.path().display().to_string(),
+            is_dir: entry.file_type().is_dir(),
+        });
+    }
+
+    let json = serde_json::to_string_pretty(&items)?;
+    println!("{}", json);
+    Ok(())
+}
+
