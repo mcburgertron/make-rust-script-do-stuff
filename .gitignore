@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target/
+*.rs.bk
+Cargo.lock
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Swap / temp
+*~
+*.swp
