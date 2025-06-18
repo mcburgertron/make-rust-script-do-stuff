@@ -6,12 +6,13 @@
 //! serde_json = "1"
 //! walkdir = "2"
 //! globset = "0.4"
+//! regex = "1"
 //! ```
 
 
 /**
 Usage:
-    rust-script gci.ers [--path <PATH>] [--depth <DEPTH>] [--filter <PATTERN>] [--hidden]
+    rust-script gci.ers [--path <PATH>] [--depth <DEPTH>] [--filter <PATTERN>] [--regex <PATTERN>] [--hidden]
 
 After associating the `.ers` extension on Windows or marking the file executable
 on Unix, you can run it directly:
@@ -22,6 +23,7 @@ Options:
     --path      Directory to search. Defaults to current directory.
     --depth     Maximum recursion depth. Defaults to unlimited.
     --filter    Glob pattern filter applied to file names.
+    --regex     Regex pattern filter applied to file names.
     --hidden    Include hidden files and folders.
 */
 
@@ -30,6 +32,7 @@ use serde::Serialize;
 use std::path::{PathBuf};
 use walkdir::{WalkDir, DirEntry};
 use globset::{Glob, GlobSet};
+use regex::Regex;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "List files in a directory as JSON")] 
@@ -45,6 +48,10 @@ struct Args {
     /// Glob pattern filter
     #[arg(long)]
     filter: Option<String>,
+
+    /// Regex pattern filter
+    #[arg(long, conflicts_with = "filter")]
+    regex: Option<String>,
 
     /// Include hidden files and directories
     #[arg(long)]
@@ -66,6 +73,12 @@ fn build_glob(pattern: &Option<String>) -> Option<GlobSet> {
     })
 }
 
+fn build_regex(pattern: &Option<String>) -> Option<Regex> {
+    pattern
+        .as_ref()
+        .map(|pat| Regex::new(pat).expect("invalid regex pattern"))
+}
+
 #[cfg(unix)]
 fn is_hidden(entry: &DirEntry) -> bool {
     entry.file_name().to_str().map_or(false, |s| s.starts_with('.'))
@@ -85,6 +98,7 @@ fn is_hidden(entry: &DirEntry) -> bool {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let glob = build_glob(&args.filter);
+    let regex = build_regex(&args.regex);
     let mut items = Vec::new();
 
     for entry in WalkDir::new(&args.path).max_depth(args.depth) {
@@ -100,6 +114,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(ref set) = glob {
             if !set.is_match(entry.file_name()) {
+                continue;
+            }
+        }
+        if let Some(ref rx) = regex {
+            if let Some(name) = entry.file_name().to_str() {
+                if !rx.is_match(name) {
+                    continue;
+                }
+            } else {
                 continue;
             }
         }
