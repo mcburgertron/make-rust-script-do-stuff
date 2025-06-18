@@ -1,0 +1,220 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! clap       = { version = "4",  features = ["derive"] }
+//! reqwest    = { version = "0.11", features = ["blocking", "json"] }
+//! serde_json = "1"
+//! ```
+//
+//! Invoke‑RestMethod clone for Rust‑script
+//!
+//! EXAMPLES
+//!   # Simple GET (auto‑prints JSON prettily if response is JSON)
+//!   ./irm.ers https://api.github.com/repos/rust-lang/rust
+//!
+//!   # POST JSON with headers and basic auth
+//!   ./irm.ers https://httpbin.org/post -Method POST \
+//!       -ContentType application/json \
+//!       -Body '{"name":"demo"}' \
+//!       -Header "X-Custom:demo" \
+//!       -User demo -Password secret
+//!
+//!   # Save to file and dump headers
+//!   ./irm.ers https://example.com/file.zip -OutFile file.zip -ResponseHeaders
+
+use clap::{ArgAction, Parser, ValueEnum};
+use reqwest::blocking::{Client, ClientBuilder, Response};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
+use serde_json::Value;
+use std::error::Error;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::Duration;
+
+#[derive(ValueEnum, Copy, Clone, Debug)]
+enum HttpMethod {
+    GET,
+    POST,
+    PUT,
+    PATCH,
+    DELETE,
+    HEAD,
+    OPTIONS,
+}
+
+/// Convert our CLI enum into reqwest's `Method` type.
+fn to_reqwest_method(h: HttpMethod) -> reqwest::Method {
+    match h {
+        HttpMethod::GET     => reqwest::Method::GET,
+        HttpMethod::POST    => reqwest::Method::POST,
+        HttpMethod::PUT     => reqwest::Method::PUT,
+        HttpMethod::PATCH   => reqwest::Method::PATCH,
+        HttpMethod::DELETE  => reqwest::Method::DELETE,
+        HttpMethod::HEAD    => reqwest::Method::HEAD,
+        HttpMethod::OPTIONS => reqwest::Method::OPTIONS,
+    }
+}
+
+#[derive(Parser, Debug)]
+#[command(version, about = "Rust‑script replacement for PowerShell Invoke‑RestMethod")]
+struct Args {
+    /// Request URL
+    url: String,
+
+    /// HTTP method (default GET)
+    #[arg(long = "Method", value_enum, default_value_t = HttpMethod::GET)]
+    method: HttpMethod,
+
+    /// Body string (use --InFile for file)
+    #[arg(long = "Body")]
+    body: Option<String>,
+
+    /// Read body from file
+    #[arg(long = "InFile")]
+    in_file: Option<PathBuf>,
+
+    /// Additional header(s) Key:Value  (repeatable)
+    #[arg(long = "Header", action = ArgAction::Append, value_parser = parse_header)]
+    headers: Vec<(String, String)>,
+
+    /// Content‑Type header
+    #[arg(long = "ContentType")]
+    content_type: Option<String>,
+
+    /// Username for basic auth
+    #[arg(long = "User")]
+    user: Option<String>,
+
+    /// Password for basic auth
+    #[arg(long = "Password")]
+    password: Option<String>,
+
+    /// Bearer token for Authorization: Bearer
+    #[arg(long = "Token")]
+    token: Option<String>,
+
+    /// Timeout in seconds
+    #[arg(long = "TimeoutSec", default_value_t = 100)]
+    timeout: u64,
+
+    /// Maximum redirects (0 disables)
+    #[arg(long = "MaximumRedirection", default_value_t = 20)]
+    max_redirects: usize,
+
+    /// Skip TLS certificate verification
+    #[arg(long = "SkipCertificateCheck")]
+    insecure: bool,
+
+    /// Save response body to file
+    #[arg(long = "OutFile")]
+    out_file: Option<PathBuf>,
+
+    /// Dump response headers to stderr
+    #[arg(long = "ResponseHeaders")]
+    dump_headers: bool,
+
+    /// Verbose – prints request line and status to stderr
+    #[arg(long = "Verbose")]
+    verbose: bool,
+}
+
+fn parse_header(s: &str) -> Result<(String, String), String> {
+    s.split_once(':')
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .ok_or_else(|| "Header must be Key:Value".into())
+}
+
+fn build_headers(pairs: &[(String, String)], ct: &Option<String>, token: &Option<String>) -> Result<HeaderMap, Box<dyn Error>> {
+    let mut map = HeaderMap::new();
+    // default UA to mimic Invoke‑RestMethod
+    map.insert(USER_AGENT, HeaderValue::from_static("Rust-IRM/0.1"));
+
+    for (k, v) in pairs {
+        let name = HeaderName::from_bytes(k.as_bytes())?;
+        let val  = HeaderValue::from_str(v)?;
+        map.insert(name, val);
+    }
+    if let Some(ct_val) = ct {
+        map.insert(reqwest::header::CONTENT_TYPE, HeaderValue::from_str(ct_val)?);
+    }
+    if let Some(tok) = token {
+        let bearer = format!("Bearer {}", tok);
+        map.insert(reqwest::header::AUTHORIZATION, HeaderValue::from_str(&bearer)?);
+    }
+    Ok(map)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
+
+    // Build reqwest client
+    let client: Client = ClientBuilder::new()
+        .danger_accept_invalid_certs(args.insecure)
+        .redirect(reqwest::redirect::Policy::limited(args.max_redirects))
+        .timeout(Duration::from_secs(args.timeout))
+        .build()?;
+
+    // Assemble request
+    let mut req = client.request(to_reqwest_method(args.method), &args.url);
+
+    // Headers
+    req = req.headers(build_headers(&args.headers, &args.content_type, &args.token)?);
+
+    // Auth
+    if let (Some(u), Some(p)) = (args.user.as_ref(), args.password.as_ref()) {
+        req = req.basic_auth(u, Some(p));
+    }
+
+    // Body: --Body overrides --InFile if both supplied
+    if let Some(body) = args.body {
+        req = req.body(body);
+    } else if let Some(path) = args.in_file {
+        let data = fs::read(path)?;
+        req = req.body(data);
+    }
+
+    if args.verbose {
+        let m = to_reqwest_method(args.method);
+        eprintln!("=> {} {}", m, args.url);
+    }
+
+    let resp: Response = req.send()?;
+    let status = resp.status();
+
+    // Collect headers before consuming body
+    let resp_headers = resp.headers().clone();
+
+    // Decide where to put body
+    let mut out: Box<dyn Write> = if let Some(path) = args.out_file.as_ref() {
+        Box::new(fs::File::create(path)?)
+    } else {
+        Box::new(std::io::stdout())
+    };
+
+    // If response is JSON, pretty print
+    let is_json = resp_headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("application/json"))
+        .unwrap_or(false);
+
+    if is_json {
+        let json: Value = resp.json()?;
+        serde_json::to_writer_pretty(&mut out, &json)?;
+        writeln!(out)?; // final newline
+    } else {
+        let text = resp.text()?;
+        write!(out, "{}", text)?;
+    }
+
+    if args.dump_headers || args.verbose {
+        eprintln!("Status: {}", status);
+        for (k, v) in resp_headers.iter() {
+            eprintln!("{}: {}", k, v.to_str().unwrap_or(""));
+        }
+    }
+
+    Ok(())
+}
+
