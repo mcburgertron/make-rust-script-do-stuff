@@ -1,0 +1,231 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! clap = { version = "4", features = ["derive"] }
+//! reqwest = { version = "0.11", features = ["json", "blocking", "rustls-tls"] }
+//! serde = { version = "1", features = ["derive"] }
+//! serde_json = "1"
+//! tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs"] }
+//! hyper = { version = "0.14", features = ["full"] }
+//! anyhow = "1"
+//! chrono = { version = "0.4", features = ["serde"] }
+//! ```
+
+use clap::Parser;
+use hyper::{service::{make_service_fn, service_fn}, Body, Request, Response, Server, StatusCode};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio::time::{self, Duration};
+use chrono::{DateTime, Utc, Duration as ChronoDuration};
+
+#[derive(Parser, Debug)]
+#[command(version, about = "Atlassian Jira Token micro-service")] 
+struct Args {
+    #[arg(long)]
+    client_id: String,
+    #[arg(long)]
+    client_secret: String,
+    #[arg(long)]
+    auth_code: Option<String>,
+    /// Print the URL to obtain the initial authorization code and exit
+    #[arg(long)]
+    print_auth_url: bool,
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct TokenInfo {
+    access_token: String,
+    refresh_token: String,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+struct TokenResp {
+    access_token: String,
+    refresh_token: String,
+    expires_in: i64,
+}
+
+struct AppState {
+    cfg: Config,
+    token: Option<TokenInfo>,
+    store: PathBuf,
+}
+
+#[derive(Clone)]
+struct Config {
+    client_id: String,
+    client_secret: String,
+    redirect_uri: String,
+}
+
+fn auth_url(cfg: &Config) -> String {
+    format!(
+        "https://auth.atlassian.com/authorize?audience=api.atlassian.com&client_id={}\
+&scope=offline_access%20read%3Ajira-user%20manage%3Ajira-configuration%20manage%3Ajira-project%20manage%3Ajira-webhook%20write%3Ajira-work%20read%3Ajira-work&redirect_uri={}\
+&state=some_state&response_type=code&prompt=consent",
+        cfg.client_id, cfg.redirect_uri
+    )
+}
+
+const TOKEN_URL: &str = "https://auth.atlassian.com/oauth/token";
+
+async fn save_refresh_token(path: &PathBuf, token: &str) -> std::io::Result<()> {
+    tokio::fs::write(path, token).await
+}
+
+async fn load_refresh_token(path: &PathBuf) -> Option<String> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(s) => Some(s.trim().to_string()),
+        Err(_) => None,
+    }
+}
+
+enum Grant {
+    AuthCode(String),
+    Refresh(String),
+}
+
+async fn request_new_tokens(cfg: &Config, grant: Grant) -> anyhow::Result<TokenResp> {
+    let client = reqwest::Client::new();
+    let mut body = serde_json::json!({
+        "client_id": cfg.client_id,
+        "client_secret": cfg.client_secret,
+        "redirect_uri": cfg.redirect_uri,
+    });
+    match grant {
+        Grant::AuthCode(code) => {
+            body["grant_type"] = serde_json::json!("authorization_code");
+            body["code"] = serde_json::json!(code);
+        }
+        Grant::Refresh(rt) => {
+            body["grant_type"] = serde_json::json!("refresh_token");
+            body["refresh_token"] = serde_json::json!(rt);
+        }
+    }
+    let resp = client
+        .post(TOKEN_URL)
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("token request failed: {}", resp.status());
+    }
+    let tr: TokenResp = resp.json().await?;
+    Ok(tr)
+}
+
+async fn renew_tokens(state: &Arc<RwLock<AppState>>, auth_code_once: &mut Option<String>) {
+    let mut st = state.write().await;
+    let refresh_opt = if let Some(tok) = st.token.as_ref() {
+        Some(tok.refresh_token.clone())
+    } else {
+        load_refresh_token(&st.store).await
+    };
+    let grant = if let Some(ref_token) = refresh_opt {
+        Grant::Refresh(ref_token)
+    } else if let Some(code) = auth_code_once.take() {
+        Grant::AuthCode(code)
+    } else {
+        eprintln!("First run needs --auth-code. Open this URL to obtain it:\n{}",
+                  auth_url(&st.cfg));
+        return;
+    };
+
+    match request_new_tokens(&st.cfg, grant).await {
+        Ok(resp) => {
+            let expires_at = Utc::now() + ChronoDuration::seconds(resp.expires_in);
+            st.token = Some(TokenInfo {
+                access_token: resp.access_token.clone(),
+                refresh_token: resp.refresh_token.clone(),
+                expires_at,
+            });
+            let _ = save_refresh_token(&st.store, &resp.refresh_token).await;
+            eprintln!("Token renewed, expires at {}", expires_at);
+        }
+        Err(e) => {
+            eprintln!("Token renewal failed: {e:?}");
+        }
+    }
+}
+
+async fn handle_req(req: Request<Body>, state: Arc<RwLock<AppState>>, auth_code_once: Arc<RwLock<Option<String>>>) -> Result<Response<Body>, hyper::Error> {
+    if req.method() == hyper::Method::GET && req.uri().path() == "/token" {
+        {
+            let mut ac = auth_code_once.write().await;
+            renew_tokens(&state, &mut ac).await;
+        }
+        let st = state.read().await;
+        if let Some(ref info) = st.token {
+            let body = serde_json::to_string(&serde_json::json!({
+                "access_token": info.access_token,
+                "expires_at": info.expires_at.to_rfc3339(),
+            })).unwrap();
+            Ok(Response::new(Body::from(body)))
+        } else {
+            let mut res = Response::new(Body::from("unable to obtain tokens"));
+            *res.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            Ok(res)
+        }
+    } else {
+        let mut res = Response::new(Body::from("Not Found"));
+        *res.status_mut() = StatusCode::NOT_FOUND;
+        Ok(res)
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    let cfg = Config {
+        client_id: args.client_id,
+        client_secret: args.client_secret,
+        redirect_uri: format!("http://localhost:{}", args.port),
+    };
+
+    if args.print_auth_url {
+        println!("{}", auth_url(&cfg));
+        return Ok(());
+    }
+    let store = PathBuf::from("jira_refresh.token");
+    let state = Arc::new(RwLock::new(AppState { cfg: cfg.clone(), token: None, store: store.clone() }));
+    let auth_code_once = Arc::new(RwLock::new(args.auth_code));
+
+    {
+        let mut ac = auth_code_once.write().await;
+        renew_tokens(&state, &mut ac).await;
+    }
+
+    let st_clone = state.clone();
+    let ac_clone = auth_code_once.clone();
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(55 * 60));
+        loop {
+            interval.tick().await;
+            let mut ac = ac_clone.write().await;
+            renew_tokens(&st_clone, &mut ac).await;
+        }
+    });
+
+    let make_svc = make_service_fn(move |_conn| {
+        let st = state.clone();
+        let ac = auth_code_once.clone();
+        async move {
+            Ok::<_, hyper::Error>(service_fn(move |req| {
+                handle_req(req, st.clone(), ac.clone())
+            }))
+        }
+    });
+
+    let addr = ([0, 0, 0, 0], args.port).into();
+    let server = Server::bind(&addr).serve(make_svc);
+    eprintln!("Token server listening on http://{}/token", addr);
+    server.await?;
+    Ok(())
+}
+

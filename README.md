@@ -37,3 +37,17 @@ Afterwards you can execute the script just like any other file:
 ```
 
 Development resources live in [AGENTS.md](AGENTS.md).
+
+## boarder.ers
+
+`boarder.ers` implements a tiny service that refreshes Atlassian Jira OAuth
+tokens and serves the current access token at `GET /token`.
+
+To obtain the initial authorization code, print the consent URL:
+
+```bash
+./boarder.ers --client-id <id> --client-secret <secret> --print-auth-url
+```
+
+Open the URL, authorize the app and pass the resulting code via
+`--auth-code` when starting the server.
