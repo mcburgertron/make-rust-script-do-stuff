@@ -51,3 +51,15 @@ To obtain the initial authorization code, print the consent URL:
 
 Open the URL, authorize the app and pass the resulting code via
 `--auth-code` when starting the server.
+
+The app requires a Jira OAuth token with the following scopes:
+
+```
+offline_access
+read:jira-user
+manage:jira-configuration
+manage:jira-project
+manage:jira-webhook
+write:jira-work
+read:jira-work
+```
