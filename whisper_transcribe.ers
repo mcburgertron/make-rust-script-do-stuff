@@ -20,8 +20,8 @@ struct Args {
     /// Path to the audio file (Windows path allowed)
     #[arg(long, required = true)]
     path: String,
-    /// Optional speed factor (currently unused)
-    #[arg(long, default_value_t = 1.0)]
+    /// Speedup factor passed to `ffmpeg`'s `atempo` filter
+    #[arg(long, default_value_t = 2.0)]
     speed: f32,
 }
 
@@ -29,9 +29,22 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let start = Instant::now();
 
-    let mut file = File::open(&args.path)?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
+    let buf = if (args.speed - 1.0).abs() > f32::EPSILON {
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-i", &args.path])
+            .args(["-filter:a", &format!("atempo={}", args.speed)])
+            .args(["-f", "wav", "-"])
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!("ffmpeg failed with status {}", output.status);
+        }
+        output.stdout
+    } else {
+        let mut file = File::open(&args.path)?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        buf
+    };
 
     let part = reqwest::blocking::multipart::Part::bytes(buf)
         .file_name(PathBuf::from(&args.path).file_name().unwrap().to_string_lossy().to_string())
