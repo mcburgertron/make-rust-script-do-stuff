@@ -1,0 +1,60 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! clap = { version = "4", features = ["derive"] }
+//! reqwest = { version = "0.11", features = ["json", "blocking", "multipart", "rustls-tls"] }
+//! anyhow = "1"
+//! serde_json = "1"
+//! ```
+
+use clap::Parser;
+use serde_json::Value;
+use std::{fs::File, io::Read, path::PathBuf, time::Instant};
+
+#[derive(Parser, Debug)]
+#[command(version, about = "Transcribe audio using OpenAI Whisper")] 
+struct Args {
+    /// OpenAI API key
+    #[arg(long, required = true)]
+    apikey: String,
+    /// Path to the audio file (Windows path allowed)
+    #[arg(long, required = true)]
+    path: String,
+    /// Optional speed factor (currently unused)
+    #[arg(long, default_value_t = 1.0)]
+    speed: f32,
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    let start = Instant::now();
+
+    let mut file = File::open(&args.path)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+
+    let part = reqwest::blocking::multipart::Part::bytes(buf)
+        .file_name(PathBuf::from(&args.path).file_name().unwrap().to_string_lossy().to_string())
+        .mime_str("audio/wav")?;
+    let form = reqwest::blocking::multipart::Form::new()
+        .part("file", part)
+        .text("model", "whisper-1");
+
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .bearer_auth(args.apikey)
+        .multipart(form)
+        .send()?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("request failed: {}", resp.status());
+    }
+
+    let json: Value = resp.json()?;
+    println!("{}", json);
+
+    let elapsed = start.elapsed();
+    println!("Total time: {:.2?}", elapsed);
+    Ok(())
+}
