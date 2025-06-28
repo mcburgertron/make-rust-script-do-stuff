@@ -63,3 +63,28 @@ manage:jira-webhook
 write:jira-work
 read:jira-work
 ```
+
+## gci.ers
+
+`gci.ers` lists files in a directory and prints them as JSON. You can limit recursion depth, filter with glob patterns or regex, and include hidden files.
+
+```bash
+./gci.ers --path . --filter '*.rs'
+```
+
+## irm.ers
+
+`irm.ers` is a flexible HTTP client inspired by PowerShell's `Invoke-RestMethod`. It supports various methods, headers, authentication and saving the response to a file.
+
+```bash
+./irm.ers https://api.github.com/repos/rust-lang/rust -Verbose
+```
+
+## whisper_transcribe.ers
+
+`whisper_transcribe.ers` sends an audio file to OpenAI Whisper for transcription. By default the audio is uploaded as-is; use `--speed` to alter playback speed via `ffmpeg` before sending.
+
+```bash
+./whisper_transcribe.ers --apikey <key> --path audio.wav
+```
+
