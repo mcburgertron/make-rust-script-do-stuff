@@ -41,8 +41,25 @@ async fn ping(ip: String) -> Option<String> {
     };
 
     match cmd.output().await {
-        Ok(out) if out.status.success() => Some(ip),
-        _ => None,
+        Ok(out) => {
+            if !out.status.success() {
+                return None;
+            }
+
+            let output = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).to_lowercase();
+
+            if output.is_empty()
+                || output.contains("timed out")
+                || output.contains("unreachable")
+                || output.contains("0 received")
+                || output.contains("100% packet loss")
+            {
+                None
+            } else {
+                Some(ip)
+            }
+        }
+        Err(_) => None,
     }
 }
 
