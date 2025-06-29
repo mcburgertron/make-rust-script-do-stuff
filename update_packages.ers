@@ -1,0 +1,74 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! clap = { version = "4", features = ["derive"] }
+//! anyhow = "1"
+//! ```
+
+use std::process::Command;
+use anyhow::{Context, Result, bail};
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(author, version, about = "Update system packages using the platform's package manager")]
+struct Cli {
+    /// Print commands without executing them
+    #[arg(long)]
+    dry_run: bool,
+}
+
+fn run_command(cmd: &str, args: &[&str], dry_run: bool) -> Result<()> {
+    if dry_run {
+        println!("{} {}", cmd, args.join(" "));
+        return Ok(());
+    }
+    let status = Command::new(cmd)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to execute {}", cmd))?;
+    if !status.success() {
+        bail!("{} exited with status {}", cmd, status);
+    }
+    Ok(())
+}
+
+fn update(dry_run: bool) -> Result<()> {
+    let os = std::env::consts::OS;
+    match os {
+        "linux" => {
+            run_command(
+                "sudo",
+                &[
+                    "sh",
+                    "-c",
+                    "apt-get update && apt-get upgrade -y && apt-get autoremove -y",
+                ],
+                dry_run,
+            )
+        }
+        "macos" => {
+            run_command("brew", &["update"], dry_run)?;
+            run_command("brew", &["upgrade"], dry_run)
+        }
+        "windows" => {
+            run_command(
+                "winget",
+                &[
+                    "upgrade",
+                    "--all",
+                    "--include-unknown",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                ],
+                dry_run,
+            )
+        }
+        other => bail!("unsupported operating system: {}", other),
+    }
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    update(cli.dry_run)
+}
+
