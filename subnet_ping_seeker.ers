@@ -1,0 +1,95 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! clap = { version = "4", features = ["derive"] }
+//! tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
+//! anyhow = "1"
+//! ```
+
+use clap::Parser;
+use tokio::{process::Command, task::JoinSet};
+
+#[derive(Parser, Debug)]
+#[command(version, about = "Ping a range of IPs on the local network in a cross-platform manner")]
+struct Args {
+    /// Subnet prefix (e.g., 192.168.1)
+    #[arg(long, default_value = "192.168.1")]
+    subnet: String,
+
+    /// Start IP range (default: 1)
+    #[arg(long, default_value_t = 1)]
+    start: u8,
+
+    /// End IP range (default: 255)
+    #[arg(long, default_value_t = 255)]
+    end: u8,
+
+    /// Number of concurrent pings (default: 32)
+    #[arg(long, default_value_t = 32)]
+    workers: usize,
+}
+
+async fn ping(ip: String) -> Option<String> {
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("ping");
+        c.args(["-n", "2", "-w", "1000", &ip]);
+        c
+    } else {
+        let mut c = Command::new("ping");
+        c.args(["-c", "2", "-W", "1", &ip]);
+        c
+    };
+
+    match cmd.output().await {
+        Ok(out) if out.status.success() => Some(ip),
+        _ => None,
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    if args.start > args.end {
+        anyhow::bail!("start must be <= end");
+    }
+
+    let ips: Vec<String> = (args.start..=args.end)
+        .map(|i| format!("{}.{}", args.subnet, i))
+        .collect();
+
+    let mut responding = Vec::new();
+    let mut tasks = JoinSet::new();
+
+    for ip in ips {
+        if tasks.len() >= args.workers {
+            if let Some(res) = tasks.join_next().await {
+                if let Ok(Some(ip)) = res {
+                    responding.push(ip);
+                }
+            }
+        }
+        tasks.spawn(ping(ip));
+    }
+
+    while let Some(res) = tasks.join_next().await {
+        if let Ok(Some(ip)) = res {
+            responding.push(ip);
+        }
+    }
+
+    if !responding.is_empty() {
+        println!("Responding IPs:");
+        responding.sort_by(|a, b| {
+            let a_num = a.rsplit('.').next().unwrap_or("0").parse::<u8>().unwrap_or(0);
+            let b_num = b.rsplit('.').next().unwrap_or("0").parse::<u8>().unwrap_or(0);
+            a_num.cmp(&b_num)
+        });
+        for ip in responding {
+            println!("{}", ip);
+        }
+    } else {
+        println!("No responding IPs found.");
+    }
+
+    Ok(())
+}
