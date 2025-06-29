@@ -96,3 +96,13 @@ read:jira-work
 ./subnet_ping_seekers.ers --subnet 192.168.1 --start 1 --end 20
 ```
 
+## gh_pr_hydra.ers
+
+`gh_pr_hydra.ers` offers several GitHub pull request utilities. You can merge PRs
+by author, query mergeability and detect conflicting file changes.
+
+```bash
+./gh_pr_hydra.ers merge-serial --author <username>
+```
+
+

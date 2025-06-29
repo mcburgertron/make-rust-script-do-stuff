@@ -209,10 +209,12 @@ fn merge_divination(author: &str) -> Result<(), Box<dyn Error>> {
 }
 
 fn merge_conflicts(author: &str) -> Result<(), Box<dyn Error>> {
+    println!("[Merge Conflicts] Checking PRs by {author} for overlapping files...");
     let mut cmd = Command::new("gh");
     cmd.args(["pr", "list", "--author", author, "--state", "open", "--json", "number,title"]);
     let out = run_command(&mut cmd)?;
     let prs: Vec<PrItem> = serde_json::from_str(&out)?;
+    println!("Found {} open PR(s).", prs.len());
     let mut files_map = std::collections::HashMap::new();
     for pr in &prs {
         println!("Fetching files for PR #{}", pr.number);
@@ -223,6 +225,8 @@ fn merge_conflicts(author: &str) -> Result<(), Box<dyn Error>> {
         let paths: Vec<String> = view.files.unwrap_or_default().into_iter().map(|f| f.path).collect();
         files_map.insert(pr.number, paths);
     }
+
+    let mut conflict_found = false;
     for (&a, files_a) in &files_map {
         for (&b, files_b) in &files_map {
             if a < b {
@@ -230,9 +234,14 @@ fn merge_conflicts(author: &str) -> Result<(), Box<dyn Error>> {
                 if !overlap.is_empty() {
                     let list = overlap.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
                     eprintln!("PR #{} and PR #{} both modify: {}", a, b, list);
+                    conflict_found = true;
                 }
             }
         }
+    }
+
+    if !conflict_found {
+        println!("No overlapping files detected among the listed PRs.");
     }
     Ok(())
 }
