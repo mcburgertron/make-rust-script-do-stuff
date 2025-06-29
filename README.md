@@ -38,6 +38,18 @@ Afterwards you can execute the script just like any other file:
 
 Development resources live in [AGENTS.md](AGENTS.md).
 
+## Avoiding common async pitfalls
+
+When writing or modifying these scripts keep a few runtime considerations in mind:
+
+* Do not hold locks (e.g. `RwLock` guards) across `.await` points. Clone the
+  needed data first, release the lock and then perform async work.
+* Prefer async file and network APIs from `tokio`/`reqwest` to avoid blocking the
+  executor.
+* If you spawn background tasks ensure they are awaited or detached properly so
+  the program can shut down cleanly.
+
+
 ## boarder.ers
 
 `boarder.ers` implements a tiny service that refreshes Atlassian Jira OAuth
