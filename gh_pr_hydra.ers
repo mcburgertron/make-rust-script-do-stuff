@@ -1,0 +1,252 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! clap = { version = "4", features = ["derive"] }
+//! serde = { version = "1", features = ["derive"] }
+//! serde_json = "1"
+//! ```
+
+use clap::{Parser, Subcommand};
+use serde::Deserialize;
+use std::process::Command;
+use std::error::Error;
+use std::io::{self, Write};
+
+#[derive(Parser)]
+#[command(author, version, about = "GitHub PR Hydra Toolkit (rust-script edition)")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Merge PRs by author serially
+    MergeSerial {
+        #[arg(long)]
+        author: String,
+        #[arg(long, default_value_t = false)]
+        delete_branch: bool,
+        #[arg(long, default_value_t = false)]
+        what_if: bool,
+    },
+    /// Show mergeability status of PRs by author
+    MergeDivination {
+        #[arg(long)]
+        author: String,
+    },
+    /// Check for overlapping files across PRs by author
+    MergeConflicts {
+        #[arg(long)]
+        author: String,
+    },
+    /// Safely remove a branch
+    RemoveBranchSafe {
+        #[arg(long)]
+        branch: String,
+        #[arg(long, default_value_t = false)]
+        what_if: bool,
+    },
+}
+
+fn run_command(cmd: &mut Command) -> Result<String, Box<dyn Error>> {
+    let output = cmd.output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(format!("{}", String::from_utf8_lossy(&output.stderr)).into())
+    }
+}
+
+#[derive(Deserialize)]
+struct BranchInfo {
+    #[serde(default)]
+    protected: bool,
+    commit: Commit,
+}
+
+#[derive(Deserialize)]
+struct Commit {
+    sha: String,
+}
+
+fn get_repo() -> Result<String, Box<dyn Error>> {
+    let mut cmd = Command::new("gh");
+    cmd.args(["repo", "view", "--json", "nameWithOwner"]);
+    let out = run_command(&mut cmd)?;
+    #[derive(Deserialize)]
+    struct Repo { 
+        #[serde(rename = "nameWithOwner")]
+        name_with_owner: String 
+    }
+    let repo: Repo = serde_json::from_str(&out)?;
+    Ok(repo.name_with_owner)
+}
+
+fn get_default_branch() -> Result<String, Box<dyn Error>> {
+    let mut cmd = Command::new("gh");
+    cmd.args(["repo", "view", "--json", "defaultBranchRef"]);
+    let out = run_command(&mut cmd)?;
+    #[derive(Deserialize)]
+    struct Ref { 
+        #[serde(rename = "defaultBranchRef")]
+        default_branch_ref: DefaultRef 
+    }
+    #[derive(Deserialize)]
+    struct DefaultRef { name: String }
+    let r: Ref = serde_json::from_str(&out)?;
+    Ok(r.default_branch_ref.name)
+}
+
+fn test_branch_deletion_safety(branch: &str, repo: &str) -> Result<bool, Box<dyn Error>> {
+    let default = get_default_branch()?;
+    if branch == default {
+        eprintln!("\u{2022} '{}' is the default branch; skipping.", branch);
+        return Ok(false);
+    }
+    let mut cmd = Command::new("gh");
+    cmd.args(["api", &format!("repos/{}/branches/{}", repo, branch)]);
+    let out = run_command(&mut cmd)?;
+    let info: BranchInfo = serde_json::from_str(&out)?;
+    if info.protected {
+        eprintln!("\u{2022} '{}' is protected; skipping.", branch);
+        return Ok(false);
+    }
+    let mut mb = Command::new("git");
+    mb.args(["merge-base", "--is-ancestor", &info.commit.sha, &format!("origin/{}", default)]);
+    let status = mb.status()?;
+    if !status.success() {
+        eprintln!("\u{2022} '{}' is not fully merged into '{}'; skipping.", branch, default);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn remove_branch_safe(branch: &str, repo: &str, what_if: bool) -> Result<(), Box<dyn Error>> {
+    if !test_branch_deletion_safety(branch, repo)? { return Ok(()); }
+    if what_if {
+        println!("Would delete remote branch '{}'", branch);
+        return Ok(());
+    }
+    let mut cmd = Command::new("gh");
+    cmd.args(["api", "-X", "DELETE", &format!("repos/{}/git/refs/heads/{}", repo, branch)]);
+    match cmd.status() {
+        Ok(st) if st.success() => println!("\u{2713} Deleted remote branch '{}'", branch),
+        _ => eprintln!("\u{2717} Failed to delete '{}'", branch),
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct PrItem {
+    number: u64,
+    title: String,
+    #[serde(rename = "headRefName")]
+    head_ref_name: Option<String>,
+    mergeable: Option<String>,
+    files: Option<Vec<FileItem>>, // for view
+}
+
+#[derive(Deserialize)]
+struct FileItem { path: String }
+
+fn merge_serial(author: &str, delete_branch: bool, what_if: bool) -> Result<(), Box<dyn Error>> {
+    println!("[Serial Mode] Merging PRs by {author}, one at a time...");
+    let mut cmd = Command::new("gh");
+    cmd.args(["pr", "list", "--author", author, "--state", "open", "--json", "number,title,headRefName"]);
+    let out = run_command(&mut cmd)?;
+    let prs: Vec<PrItem> = serde_json::from_str(&out)?;
+    let repo = get_repo()?;
+    for pr in prs {
+        let pr_number = pr.number.to_string();
+        let title = &pr.title;
+        let branch = pr.head_ref_name.clone().unwrap_or_default();
+        println!("Attempting to merge PR #{pr_number}; '{title}'");
+        let mut merge_cmd = Command::new("gh");
+        merge_cmd.args(["pr", "merge", &pr_number, "--squash"]);
+        if delete_branch { merge_cmd.arg("--delete-branch"); }
+        let result = merge_cmd.output()?;
+        if result.status.success() {
+            println!("\u{2713} PR #{pr_number} merged.");
+            if delete_branch {
+                let mut check = Command::new("gh");
+                check.args(["api", &format!("repos/{}/branches/{}", repo, branch), "-q", ".name"]);
+                let branch_exists = check.output()?.status.success();
+                if branch_exists {
+                    println!("\u{2022} Remote branch '{}' still exists; performing safety checks…", branch);
+                    remove_branch_safe(&branch, &repo, what_if)?;
+                } else {
+                    println!("\u{2022} Remote branch '{}' confirmed deleted.", branch);
+                }
+            }
+        } else {
+            eprintln!("\u{2717} PR #{pr_number} failed to merge. Reason:");
+            io::stderr().write_all(&result.stderr)?;
+            let mut file = std::fs::OpenOptions::new().append(true).create(true).open("merge_failures.txt")?;
+            writeln!(file, "PR #{pr_number}: {title} failed to merge. Reason: {}", String::from_utf8_lossy(&result.stderr))?;
+        }
+    }
+    println!("Serial merge complete. Consult merge_failures.txt for stragglers.");
+    Ok(())
+}
+
+fn merge_divination(author: &str) -> Result<(), Box<dyn Error>> {
+    println!("[Merge Divination] Peering into the mergeable fates of {author}'s PRs...");
+    let mut cmd = Command::new("gh");
+    cmd.args(["pr", "list", "--author", author, "--state", "open", "--json", "number,title,mergeable"]);
+    let out = run_command(&mut cmd)?;
+    let prs: Vec<PrItem> = serde_json::from_str(&out)?;
+    let mergeable: Vec<_> = prs.iter().filter(|p| p.mergeable.as_deref() == Some("MERGEABLE")).collect();
+    let conflicted: Vec<_> = prs.iter().filter(|p| p.mergeable.as_deref() == Some("CONFLICTING")).collect();
+    let unknown: Vec<_> = prs.iter().filter(|p| p.mergeable.is_none() || p.mergeable.as_deref() == Some("UNKNOWN")).collect();
+    println!("\nMergeable PRs:");
+    if mergeable.is_empty() { println!("  (none)"); } else { for p in mergeable { println!("  \u{2713} PR #{}: '{}'", p.number, p.title); } }
+    println!("\nPRs with merge conflicts:");
+    if conflicted.is_empty() { println!("  (none)"); } else { for p in conflicted { println!("  \u{2717} PR #{}: '{}'", p.number, p.title); } }
+    println!("\nPRs with unknown mergeability (prophecy unclear):");
+    if unknown.is_empty() { println!("  (none)"); } else { for p in unknown { println!("  ? PR #{}: '{}'", p.number, p.title); } }
+    Ok(())
+}
+
+fn merge_conflicts(author: &str) -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::new("gh");
+    cmd.args(["pr", "list", "--author", author, "--state", "open", "--json", "number,title"]);
+    let out = run_command(&mut cmd)?;
+    let prs: Vec<PrItem> = serde_json::from_str(&out)?;
+    let mut files_map = std::collections::HashMap::new();
+    for pr in &prs {
+        println!("Fetching files for PR #{}", pr.number);
+        let mut cmd = Command::new("gh");
+        cmd.args(["pr", "view", &pr.number.to_string(), "--json", "files"]);
+        let out = run_command(&mut cmd)?;
+        let view: PrItem = serde_json::from_str(&out)?;
+        let paths: Vec<String> = view.files.unwrap_or_default().into_iter().map(|f| f.path).collect();
+        files_map.insert(pr.number, paths);
+    }
+    for (&a, files_a) in &files_map {
+        for (&b, files_b) in &files_map {
+            if a < b {
+                let overlap: Vec<&String> = files_a.iter().filter(|f| files_b.contains(*f)).collect();
+                if !overlap.is_empty() {
+                    let list = overlap.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+                    eprintln!("PR #{} and PR #{} both modify: {}", a, b, list);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::MergeSerial { author, delete_branch, what_if } => merge_serial(&author, delete_branch, what_if)?,
+        Commands::MergeDivination { author } => merge_divination(&author)?,
+        Commands::MergeConflicts { author } => merge_conflicts(&author)?,
+        Commands::RemoveBranchSafe { branch, what_if } => {
+            let repo = get_repo()?;
+            remove_branch_safe(&branch, &repo, what_if)?;
+        }
+    }
+    Ok(())
+}
