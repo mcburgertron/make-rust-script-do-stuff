@@ -106,3 +106,13 @@ by author, query mergeability and detect conflicting file changes.
 ```
 
 
+## update_packages.ers
+
+`update_packages.ers` updates system packages using the appropriate package manager for the current operating system. Linux hosts use `apt-get`, macOS relies on Homebrew, and Windows uses `winget`.
+
+```bash
+./update_packages.ers
+# show commands without executing them
+./update_packages.ers --dry-run
+```
+
