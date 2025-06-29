@@ -38,6 +38,18 @@ Afterwards you can execute the script just like any other file:
 
 Development resources live in [AGENTS.md](AGENTS.md).
 
+## Avoiding common async pitfalls
+
+When writing or modifying these scripts keep a few runtime considerations in mind:
+
+* Do not hold locks (e.g. `RwLock` guards) across `.await` points. Clone the
+  needed data first, release the lock and then perform async work.
+* Prefer async file and network APIs from `tokio`/`reqwest` to avoid blocking the
+  executor.
+* If you spawn background tasks ensure they are awaited or detached properly so
+  the program can shut down cleanly.
+
+
 ## boarder.ers
 
 `boarder.ers` implements a tiny service that refreshes Atlassian Jira OAuth
@@ -105,8 +117,6 @@ by author, query mergeability and detect conflicting file changes.
 ./gh_pr_hydra.ers merge-serial --author <username>
 ```
 
-
-
 ## ipmi_scan.ers
 
 `ipmi_scan.ers` locates IPMI-enabled devices on a subnet. It pings each address and then probes port 623 for any UDP response before attempting a full IPMI handshake. The results are grouped by confidence.
@@ -129,4 +139,14 @@ Possible IPMI devices (responded to UDP/623):
 Responsive hosts not matching IPMI (ICMP ping only):
   192.168.1.66
   192.168.1.77
+```
+
+## update_packages.ers
+
+`update_packages.ers` updates system packages using the appropriate package manager for the current operating system. Linux hosts use `apt-get`, macOS relies on Homebrew, Windows uses `winget`, and Android (Termux) uses `pkg`.
+
+```bash
+./update_packages.ers
+# show commands without executing them
+./update_packages.ers --dry-run
 ```
