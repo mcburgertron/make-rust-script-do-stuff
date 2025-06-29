@@ -46,6 +46,11 @@ fn update(dry_run: bool) -> Result<()> {
                 dry_run,
             )
         }
+        "android" => {
+            // Termux package management
+            run_command("pkg", &["update"], dry_run)?;
+            run_command("pkg", &["upgrade -y"], dry_run)
+        }
         "macos" => {
             run_command("brew", &["update"], dry_run)?;
             run_command("brew", &["upgrade"], dry_run)
