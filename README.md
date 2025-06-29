@@ -111,10 +111,12 @@ read:jira-work
 ## gh_pr_hydra.ers
 
 `gh_pr_hydra.ers` offers several GitHub pull request utilities. You can merge PRs
-by author, query mergeability and detect conflicting file changes.
+by author, query mergeability, detect conflicting file changes and mark draft PRs
+ready for review.
 
 ```bash
 ./gh_pr_hydra.ers merge-serial --author <username>
+./gh_pr_hydra.ers ready-drafts --author <username>
 ```
 
 ## ipmi_scan.ers
