@@ -1,0 +1,209 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! clap = { version = "4", features = ["derive"] }
+//! tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "net", "time"] }
+//! rust-ipmi = "0.1.1"
+//! anyhow = "1"
+//! ```
+
+use clap::Parser;
+use tokio::{net::{UdpSocket, TcpStream}, process::Command, task::JoinSet, time::{timeout, Duration}};
+use rust_ipmi::IPMIClient;
+
+#[derive(Parser, Debug)]
+#[command(version, about = "Locate IPMI-enabled devices on a subnet")]
+struct Args {
+    /// Subnet prefix (e.g., 192.168.1)
+    #[arg(long, default_value = "192.168.1")]
+    subnet: String,
+
+    /// IP range start (default: 1)
+    #[arg(long, default_value_t = 1)]
+    start: u8,
+
+    /// IP range end (default: 255)
+    #[arg(long, default_value_t = 255)]
+    end: u8,
+
+    /// Concurrent workers (default: 32)
+    #[arg(long, default_value_t = 32)]
+    workers: usize,
+
+    /// IPMI username
+    #[arg(long, default_value = "root")]
+    user: String,
+
+    /// IPMI password
+    #[arg(long, default_value = "root")]
+    password: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Status {
+    Confirmed,
+    Possible,
+    NonIpmi,
+}
+
+async fn udp_probe(ip: &str, port: u16) -> bool {
+    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await {
+        let _ = sock.send_to(&[0x06, 0x00, 0xff, 0x06], (ip, port)).await;
+        let mut buf = [0u8; 32];
+        if timeout(Duration::from_secs(1), sock.recv_from(&mut buf)).await.is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+async fn tcp_probe(ip: &str, port: u16) -> bool {
+    match timeout(Duration::from_secs(1), TcpStream::connect((ip, port))).await {
+        Ok(Ok(_)) => true,
+        _ => false,
+    }
+}
+
+async fn ping(ip: String) -> Option<String> {
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("ping");
+        c.args(["-n", "1", "-w", "1000", &ip]);
+        c
+    } else {
+        let mut c = Command::new("ping");
+        c.args(["-c", "1", "-W", "1", &ip]);
+        c
+    };
+    match cmd.output().await {
+        Ok(out) => {
+            if !out.status.success() {
+                return None;
+            }
+            let output = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).to_lowercase();
+            if output.is_empty()
+                || output.contains("timed out")
+                || output.contains("unreachable")
+                || output.contains("0 received")
+                || output.contains("100% packet loss")
+            {
+                None
+            } else {
+                Some(ip)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+fn test_ipmi(ip: String, user: String, password: String) -> bool {
+    let addr = format!("{}:623", ip);
+    match IPMIClient::new(addr) {
+        Ok(mut client) => {
+            let _ = client.set_read_timeout(Some(Duration::from_secs(3)));
+            client.establish_connection(user, password).is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
+async fn evaluate_ip(ip: String, user: String, password: String) -> (String, Status) {
+    let ip_clone = ip.clone();
+    let handshake = tokio::task::spawn_blocking(move || test_ipmi(ip_clone, user, password))
+        .await
+        .unwrap_or(false);
+    if handshake {
+        return (ip, Status::Confirmed);
+    }
+    if udp_probe(&ip, 623).await
+        || udp_probe(&ip, 664).await
+        || tcp_probe(&ip, 623).await
+        || tcp_probe(&ip, 664).await
+    {
+        (ip, Status::Possible)
+    } else {
+        (ip, Status::NonIpmi)
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    if args.start > args.end {
+        anyhow::bail!("start must be <= end");
+    }
+    let ips: Vec<String> = (args.start..=args.end)
+        .map(|i| format!("{}.{}", args.subnet, i))
+        .collect();
+
+    let mut responding = Vec::new();
+    let mut ping_tasks = JoinSet::new();
+    for ip in ips {
+        if ping_tasks.len() >= args.workers {
+            if let Some(res) = ping_tasks.join_next().await {
+                if let Ok(Some(ip)) = res {
+                    responding.push(ip);
+                }
+            }
+        }
+        ping_tasks.spawn(ping(ip));
+    }
+    while let Some(res) = ping_tasks.join_next().await {
+        if let Ok(Some(ip)) = res {
+            responding.push(ip);
+        }
+    }
+
+    let mut confirmed = Vec::new();
+    let mut possible = Vec::new();
+    let mut non_ipmi = Vec::new();
+    let mut eval_tasks = JoinSet::new();
+    for ip in responding {
+        if eval_tasks.len() >= args.workers {
+            if let Some(res) = eval_tasks.join_next().await {
+                if let Ok((ip, status)) = res {
+                    match status {
+                        Status::Confirmed => confirmed.push(ip),
+                        Status::Possible => possible.push(ip),
+                        Status::NonIpmi => non_ipmi.push(ip),
+                    }
+                }
+            }
+        }
+        eval_tasks.spawn(evaluate_ip(ip, args.user.clone(), args.password.clone()));
+    }
+    while let Some(res) = eval_tasks.join_next().await {
+        if let Ok((ip, status)) = res {
+            match status {
+                Status::Confirmed => confirmed.push(ip),
+                Status::Possible => possible.push(ip),
+                Status::NonIpmi => non_ipmi.push(ip),
+            }
+        }
+    }
+
+    if !confirmed.is_empty() {
+        println!("IPMI devices found (confirmed by handshake):");
+        confirmed.sort();
+        for ip in &confirmed {
+            println!("  {}", ip);
+        }
+    }
+    if !possible.is_empty() {
+        println!("\nPossible IPMI devices (responded to UDP/623):");
+        possible.sort();
+        for ip in &possible {
+            println!("  {}", ip);
+        }
+    }
+    if !non_ipmi.is_empty() {
+        println!("\nResponsive hosts not matching IPMI (ICMP ping only):");
+        non_ipmi.sort();
+        for ip in &non_ipmi {
+            println!("  {}", ip);
+        }
+    }
+    if confirmed.is_empty() && possible.is_empty() && non_ipmi.is_empty() {
+        println!("No responding hosts found.");
+    }
+    Ok(())
+}

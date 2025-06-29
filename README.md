@@ -106,3 +106,27 @@ by author, query mergeability and detect conflicting file changes.
 ```
 
 
+
+## ipmi_scan.ers
+
+`ipmi_scan.ers` locates IPMI-enabled devices on a subnet. It pings each address and then probes port 623 for any UDP response before attempting a full IPMI handshake. The results are grouped by confidence.
+
+```bash
+./ipmi_scan.ers --subnet 192.168.1 --user root --password root
+```
+
+A typical run might produce output like:
+
+```
+IPMI devices found (confirmed by handshake):
+  192.168.1.12
+  192.168.1.20
+
+Possible IPMI devices (responded to UDP/623):
+  192.168.1.25
+  192.168.1.42
+
+Responsive hosts not matching IPMI (ICMP ping only):
+  192.168.1.66
+  192.168.1.77
+```
