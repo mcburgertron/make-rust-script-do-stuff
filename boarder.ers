@@ -120,31 +120,40 @@ async fn request_new_tokens(cfg: &Config, grant: Grant) -> anyhow::Result<TokenR
 }
 
 async fn renew_tokens(state: &Arc<RwLock<AppState>>, auth_code_once: &mut Option<String>) {
-    let mut st = state.write().await;
-    let refresh_opt = if let Some(tok) = st.token.as_ref() {
-        Some(tok.refresh_token.clone())
-    } else {
-        load_refresh_token(&st.store).await
+    // clone data without holding the lock across .await
+    let (cfg, token_opt, store) = {
+        let st = state.read().await;
+        (st.cfg.clone(), st.token.clone(), st.store.clone())
     };
+
+    let refresh_opt = if let Some(tok) = token_opt {
+        Some(tok.refresh_token)
+    } else {
+        load_refresh_token(&store).await
+    };
+
     let grant = if let Some(ref_token) = refresh_opt {
         Grant::Refresh(ref_token)
     } else if let Some(code) = auth_code_once.take() {
         Grant::AuthCode(code)
     } else {
         eprintln!("First run needs --auth-code. Open this URL to obtain it:\n{}",
-                  auth_url(&st.cfg));
+                  auth_url(&cfg));
         return;
     };
 
-    match request_new_tokens(&st.cfg, grant).await {
+    match request_new_tokens(&cfg, grant).await {
         Ok(resp) => {
             let expires_at = Utc::now() + ChronoDuration::seconds(resp.expires_in);
+            if let Err(e) = save_refresh_token(&store, &resp.refresh_token).await {
+                eprintln!("Failed to save refresh token: {e}");
+            }
+            let mut st = state.write().await;
             st.token = Some(TokenInfo {
                 access_token: resp.access_token.clone(),
                 refresh_token: resp.refresh_token.clone(),
                 expires_at,
             });
-            let _ = save_refresh_token(&st.store, &resp.refresh_token).await;
             eprintln!("Token renewed, expires at {}", expires_at);
         }
         Err(e) => {
