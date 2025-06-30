@@ -9,8 +9,17 @@
 
 use clap::Parser;
 use serde::Serialize;
-use sysinfo::System;
+use sysinfo::{System, Disks};
 use std::process::Command;
+
+fn run_command(cmd: &str, args: &[&str]) -> Option<String> {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| if s.trim().is_empty() { None } else { Some(s) })
+}
 
 #[derive(Parser)]
 #[command(author, version, about = "Display physical machine details" )]
@@ -30,6 +39,18 @@ struct MachineInfo {
     total_memory: u64,
     manufacturer: Option<String>,
     model: Option<String>,
+    disks: Vec<DiskInfo>,
+    pcie: Option<String>,
+    usb: Option<String>,
+    bluetooth: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DiskInfo {
+    name: String,
+    file_system: String,
+    total_space: u64,
+    used_space: u64,
 }
 
 fn is_termux() -> bool {
@@ -90,6 +111,8 @@ fn main() {
 
     let sys = System::new_all();
 
+    let disks = Disks::new_with_refreshed_list();
+
     let mut info = MachineInfo {
         os_name: System::name(),
         kernel_version: System::kernel_version(),
@@ -99,6 +122,25 @@ fn main() {
         total_memory: sys.total_memory(),
         manufacturer: None,
         model: None,
+        disks: disks
+            .iter()
+            .map(|d| DiskInfo {
+                name: d.name().to_string_lossy().to_string(),
+                file_system: d.file_system().to_string_lossy().to_string(),
+                total_space: d.total_space(),
+                used_space: d.total_space() - d.available_space(),
+            })
+            .collect(),
+        pcie: run_command("lspci", &[]),
+        usb: run_command("lsusb", &[]),
+        bluetooth: run_command("lspci", &[]).and_then(|s| {
+            let lines: Vec<String> = s
+                .lines()
+                .filter(|l| l.to_lowercase().contains("bluetooth"))
+                .map(|l| l.to_string())
+                .collect();
+            if lines.is_empty() { None } else { Some(lines.join("\n")) }
+        }),
     };
 
     match std::env::consts::OS {
@@ -127,6 +169,27 @@ fn main() {
         }
         if let Some(ref m) = info.model {
             println!("Model: {}", m);
+        }
+        if !info.disks.is_empty() {
+            println!("Disks:");
+            for d in &info.disks {
+                println!(
+                    "  {}: {} used of {} bytes ({})",
+                    d.name,
+                    d.used_space,
+                    d.total_space,
+                    d.file_system
+                );
+            }
+        }
+        if let Some(ref p) = info.pcie {
+            println!("PCIe devices:\n{}", p.trim_end());
+        }
+        if let Some(ref u) = info.usb {
+            println!("USB devices:\n{}", u.trim_end());
+        }
+        if let Some(ref b) = info.bluetooth {
+            println!("Bluetooth devices:\n{}", b.trim_end());
         }
     }
 }

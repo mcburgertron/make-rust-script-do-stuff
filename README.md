@@ -173,8 +173,9 @@ Responsive hosts not matching IPMI (ICMP ping only):
 ## machine_details.ers
 
 `machine_details.ers` prints information about the current machine. It combines
-generic data from `sysinfo` with platform specific helpers. Use `--json` to
-output structured data.
+generic data from `sysinfo` with platform specific helpers. The script now also
+lists disk usage, PCIe devices, USB devices, and bluetooth adapters when
+available. Use `--json` to output structured data.
 
 ```bash
 ./machine_details.ers --json
