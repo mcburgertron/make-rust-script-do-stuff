@@ -87,11 +87,6 @@ struct Commit {
     sha: String,
 }
 
-#[derive(Deserialize)]
-struct PrCheck {
-    number: u64,
-}
-
 fn branch_has_merged_pr(repo: &str, branch: &str) -> Result<bool, Box<dyn Error>> {
     let mut cmd = Command::new("gh");
     cmd.args([
@@ -107,7 +102,7 @@ fn branch_has_merged_pr(repo: &str, branch: &str) -> Result<bool, Box<dyn Error>
         "number",
     ]);
     let out = run_command(&mut cmd)?;
-    let prs: Vec<PrCheck> = serde_json::from_str(&out)?;
+    let prs: Vec<serde_json::Value> = serde_json::from_str(&out)?;
     Ok(!prs.is_empty())
 }
 
@@ -174,11 +169,13 @@ fn remove_branch_safe(branch: &str, repo: &str, what_if: bool) -> Result<(), Box
         return Ok(());
     }
     let mut cmd = Command::new("gh");
-    let b = encode(branch);
-    cmd.args(["api", "-X", "DELETE", &format!("repos/{}/git/refs/heads/{}", repo, b)]);
+    let path = format!("heads/{}", branch);
+    let r = encode(&path);
+    cmd.args(["api", "-X", "DELETE", &format!("repos/{}/git/refs/{}", repo, r)]);
     match cmd.status() {
         Ok(st) if st.success() => println!("\u{2713} Deleted remote branch '{}'", branch),
-        _ => eprintln!("\u{2717} Failed to delete '{}'", branch),
+        Ok(_) => eprintln!("\u{2717} Failed to delete '{}'", branch),
+        Err(_) => eprintln!("\u{2717} Failed to delete '{}'", branch),
     }
     Ok(())
 }
