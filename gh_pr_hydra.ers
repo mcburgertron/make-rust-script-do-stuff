@@ -87,6 +87,30 @@ struct Commit {
     sha: String,
 }
 
+#[derive(Deserialize)]
+struct PrCheck {
+    number: u64,
+}
+
+fn branch_has_merged_pr(repo: &str, branch: &str) -> Result<bool, Box<dyn Error>> {
+    let mut cmd = Command::new("gh");
+    cmd.args([
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "merged",
+        "--head",
+        branch,
+        "--json",
+        "number",
+    ]);
+    let out = run_command(&mut cmd)?;
+    let prs: Vec<PrCheck> = serde_json::from_str(&out)?;
+    Ok(!prs.is_empty())
+}
+
 fn get_repo() -> Result<String, Box<dyn Error>> {
     let mut cmd = Command::new("gh");
     cmd.args(["repo", "view", "--json", "nameWithOwner"]);
@@ -129,6 +153,9 @@ fn test_branch_deletion_safety(branch: &str, repo: &str) -> Result<bool, Box<dyn
     if info.protected {
         eprintln!("\u{2022} '{}' is protected; skipping.", branch);
         return Ok(false);
+    }
+    if branch_has_merged_pr(repo, branch)? {
+        return Ok(true);
     }
     let mut mb = Command::new("git");
     mb.args(["merge-base", "--is-ancestor", &info.commit.sha, &format!("origin/{}", default)]);

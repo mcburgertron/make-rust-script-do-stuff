@@ -132,8 +132,8 @@ Get-ChildItem -Directory -Depth 0 | ForEach-Object -Process {
 
 * The branch is not the default branch.
 * The branch is not marked as protected on GitHub.
-* Its latest commit is an ancestor of the default branch, ensuring it was fully
-  merged.
+* Its latest commit is an ancestor of the default branch, or the branch has a
+  merged pull request, ensuring it was fully merged.
 
 
 ## ipmi_scan.ers
