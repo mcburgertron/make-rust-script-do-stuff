@@ -45,3 +45,11 @@ blocking:
   data you need first, then release the lock before calling async functions.
 * Use the async versions of file and network APIs whenever possible.
 * Be mindful of spawned tasks and clean them up when your program exits.
+
+## Parsing URLs and text
+
+Avoid ad-hoc string manipulation when dealing with URLs or other structured
+text. Use the [`url`](https://docs.rs/url) crate to parse and validate URLs, and
+consider libraries like [`regex`](https://docs.rs/regex) or `serde` for more
+complex formats. Proper parsing prevents subtle bugs and makes the code easier
+to maintain.
