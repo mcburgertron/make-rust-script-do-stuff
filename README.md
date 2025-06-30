@@ -121,12 +121,17 @@ against a different local repository without changing directories.
 ./gh_pr_hydra.ers clean-merged --what-if
 ```
 
+```powershell
+Get-ChildItem -Directory -Depth 0 | ForEach-Object -Process {Write-Host -ForegroundColor Yellow "Divining merge for $_"; rust-script .\make-rust-script-do-stuff\gh_pr_hydra.ers --repo-path $_.FullName merge-divination --author mcburgertron}
+```
+
 `remove-branch-safe` deletes a branch only when all of the following hold:
 
 * The branch is not the default branch.
 * The branch is not marked as protected on GitHub.
 * Its latest commit is an ancestor of the default branch, ensuring it was fully
   merged.
+
 
 ## ipmi_scan.ers
 
