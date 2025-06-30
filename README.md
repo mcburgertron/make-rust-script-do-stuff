@@ -122,7 +122,10 @@ against a different local repository without changing directories.
 ```
 
 ```powershell
-Get-ChildItem -Directory -Depth 0 | ForEach-Object -Process {Write-Host -ForegroundColor Yellow "Divining merge for $_"; rust-script .\make-rust-script-do-stuff\gh_pr_hydra.ers --repo-path $_.FullName merge-divination --author mcburgertron}
+Get-ChildItem -Directory -Depth 0 | ForEach-Object -Process {
+    Write-Host -ForegroundColor Yellow "Divining merge for $_"
+    rust-script .\make-rust-script-do-stuff\gh_pr_hydra.ers --repo-path $_.FullName merge-divination --author mcburgertron
+}
 ```
 
 `remove-branch-safe` deletes a branch only when all of the following hold:
