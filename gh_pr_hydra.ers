@@ -4,6 +4,7 @@
 //! clap = { version = "4", features = ["derive"] }
 //! serde = { version = "1", features = ["derive"] }
 //! serde_json = "1"
+//! urlencoding = "2"
 //! ```
 
 use clap::{Parser, Subcommand};
@@ -11,6 +12,7 @@ use serde::Deserialize;
 use std::process::Command;
 use std::error::Error;
 use std::io::{self, Write};
+use urlencoding::encode;
 
 #[derive(Parser)]
 #[command(author, version, about = "GitHub PR Hydra Toolkit (rust-script edition)")]
@@ -120,7 +122,8 @@ fn test_branch_deletion_safety(branch: &str, repo: &str) -> Result<bool, Box<dyn
         return Ok(false);
     }
     let mut cmd = Command::new("gh");
-    cmd.args(["api", &format!("repos/{}/branches/{}", repo, branch)]);
+    let b = encode(branch);
+    cmd.args(["api", &format!("repos/{}/branches/{}", repo, b)]);
     let out = run_command(&mut cmd)?;
     let info: BranchInfo = serde_json::from_str(&out)?;
     if info.protected {
@@ -144,7 +147,8 @@ fn remove_branch_safe(branch: &str, repo: &str, what_if: bool) -> Result<(), Box
         return Ok(());
     }
     let mut cmd = Command::new("gh");
-    cmd.args(["api", "-X", "DELETE", &format!("repos/{}/git/refs/heads/{}", repo, branch)]);
+    let b = encode(branch);
+    cmd.args(["api", "-X", "DELETE", &format!("repos/{}/git/refs/heads/{}", repo, b)]);
     match cmd.status() {
         Ok(st) if st.success() => println!("\u{2713} Deleted remote branch '{}'", branch),
         _ => eprintln!("\u{2717} Failed to delete '{}'", branch),
@@ -207,7 +211,8 @@ fn merge_serial(author: &str, delete_branch: bool, what_if: bool) -> Result<(), 
             println!("\u{2713} PR #{pr_number} merged.");
             if delete_branch {
                 let mut check = Command::new("gh");
-                check.args(["api", &format!("repos/{}/branches/{}", repo, branch), "-q", ".name"]);
+                let b = encode(&branch);
+                check.args(["api", &format!("repos/{}/branches/{}", repo, b), "-q", ".name"]);
                 let branch_exists = check.output()?.status.success();
                 if branch_exists {
                     println!("\u{2022} Remote branch '{}' still exists; performing safety checks…", branch);
