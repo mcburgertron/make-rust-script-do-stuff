@@ -25,6 +25,7 @@
 use clap::{ArgAction, Parser, ValueEnum};
 use reqwest::blocking::{Client, ClientBuilder, Response};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
+use reqwest::Url;
 use serde_json::Value;
 use std::error::Error;
 use std::fs;
@@ -147,6 +148,8 @@ fn build_headers(pairs: &[(String, String)], ct: &Option<String>, token: &Option
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
+    let url = Url::parse(&args.url)
+        .map_err(|e| format!("Invalid URL '{}': {e}", args.url))?;
 
     // Build reqwest client
     let client: Client = ClientBuilder::new()
@@ -156,7 +159,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build()?;
 
     // Assemble request
-    let mut req = client.request(to_reqwest_method(args.method), &args.url);
+    let mut req = client.request(to_reqwest_method(args.method), url);
 
     // Headers
     req = req.headers(build_headers(&args.headers, &args.content_type, &args.token)?);
