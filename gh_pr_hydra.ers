@@ -173,6 +173,12 @@ fn clean_merged_branches(repo: &str, what_if: bool) -> Result<(), Box<dyn Error>
     for branch in list_branches(repo)? {
         remove_branch_safe(&branch, repo, what_if)?;
     }
+    // Prune local references to the branches we just deleted so a second run
+    // isn't required to clean them up.
+    let status = Command::new("git").args(["fetch", "--prune"]).status();
+    if status.map(|s| !s.success()).unwrap_or(true) {
+        eprintln!("Warning: final 'git fetch --prune' failed");
+    }
     Ok(())
 }
 
