@@ -50,6 +50,13 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         what_if: bool,
     },
+    /// Mark draft PRs by author as ready for review
+    ReadyDrafts {
+        #[arg(long)]
+        author: String,
+        #[arg(long, default_value_t = false)]
+        what_if: bool,
+    },
     /// Delete all remote branches fully merged into the default branch
     CleanMerged {
         #[arg(long, default_value_t = false)]
@@ -156,6 +163,8 @@ struct PrItem {
     title: String,
     #[serde(rename = "headRefName")]
     head_ref_name: Option<String>,
+    #[serde(rename = "isDraft")]
+    is_draft: Option<bool>,
     mergeable: Option<String>,
     files: Option<Vec<FileItem>>, // for view
 }
@@ -261,6 +270,34 @@ fn merge_conflicts(author: &str, path: Option<&str>) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+fn ready_drafts(author: &str, what_if: bool, path: Option<&str>) -> Result<(), Box<dyn Error>> {
+    println!("[Ready Drafts] Converting {author}'s draft PRs to ready for review...");
+    let mut cmd = Command::new("gh");
+    cmd.args(["pr", "list", "--author", author, "--state", "open", "--json", "number,title,isDraft"]);
+    let out = run_command(&mut cmd, path)?;
+    let prs: Vec<PrItem> = serde_json::from_str(&out)?;
+    let drafts: Vec<_> = prs.into_iter().filter(|p| p.is_draft.unwrap_or(false)).collect();
+    if drafts.is_empty() {
+        println!("No draft PRs found for {author}.");
+        return Ok(());
+    }
+    for pr in drafts {
+        println!("Draft PR #{}: '{}'", pr.number, pr.title);
+        if what_if {
+            println!("  Would mark ready for review");
+        } else {
+            let mut rc = Command::new("gh");
+            rc.args(["pr", "ready", &pr.number.to_string()]);
+            if let Some(p) = path { rc.current_dir(p); }
+            match rc.status() {
+                Ok(st) if st.success() => println!("  \u{2713} Marked ready"),
+                _ => eprintln!("  \u{2717} Failed to mark ready"),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn clean_merged(what_if: bool, path: Option<&str>) -> Result<(), Box<dyn Error>> {
     let repo = get_repo(path)?;
     let default = get_default_branch(path)?;
@@ -290,6 +327,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let repo = get_repo(path)?;
             remove_branch_safe(&branch, &repo, what_if, path)?;
         }
+        Commands::ReadyDrafts { author, what_if } => ready_drafts(&author, what_if, path)?,
         Commands::CleanMerged { what_if } => clean_merged(what_if, path)?,
     }
     Ok(())

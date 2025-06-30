@@ -112,11 +112,12 @@ read:jira-work
 
 `gh_pr_hydra.ers` offers several GitHub pull request utilities. Provide
 `--repo-path` to point at any local git repository. You can merge PRs by author,
-query mergeability, detect conflicting file changes and clean up merged
-branches.
+query mergeability, detect conflicting file changes, mark draft PRs ready for
+review and clean up merged branches.
 
 ```bash
 ./gh_pr_hydra.ers --repo-path /path/to/repo merge-serial --author <username>
+./gh_pr_hydra.ers --repo-path /path/to/repo ready-drafts --author <username>
 ```
 
 Use `clean-merged` to delete all remote branches fully merged into the default
