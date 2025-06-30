@@ -1,0 +1,133 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! clap = { version = "4", features = ["derive"] }
+//! serde = { version = "1", features = ["derive"] }
+//! serde_json = "1"
+//! sysinfo = { version = "0.35", features = ["serde"] }
+//! ```
+
+use clap::Parser;
+use serde::Serialize;
+use sysinfo::System;
+use std::process::Command;
+
+#[derive(Parser)]
+#[command(author, version, about = "Display physical machine details" )]
+struct Args {
+    /// Output information as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Serialize)]
+struct MachineInfo {
+    os_name: Option<String>,
+    kernel_version: Option<String>,
+    hostname: Option<String>,
+    cpu_brand: String,
+    cpu_cores: usize,
+    total_memory: u64,
+    manufacturer: Option<String>,
+    model: Option<String>,
+}
+
+fn is_termux() -> bool {
+    std::env::var("PREFIX").map_or(false, |p| p.contains("com.termux"))
+        || std::fs::metadata("/data/data/com.termux/files").is_ok()
+}
+
+fn gather_linux(info: &mut MachineInfo) {
+    if let Ok(vendor) = std::fs::read_to_string("/sys/class/dmi/id/sys_vendor") {
+        info.manufacturer = Some(vendor.trim().to_string());
+    }
+    if let Ok(model) = std::fs::read_to_string("/sys/class/dmi/id/product_name") {
+        info.model = Some(model.trim().to_string());
+    }
+    if info.model.is_none() {
+        if let Ok(model) = std::fs::read_to_string("/proc/device-tree/model") {
+            info.model = Some(model.trim_matches('\0').to_string());
+        }
+    }
+    if is_termux() {
+        if let Ok(out) = Command::new("getprop").arg("ro.product.manufacturer").output() {
+            if let Ok(text) = String::from_utf8(out.stdout) {
+                if !text.trim().is_empty() {
+                    info.manufacturer = Some(text.trim().to_string());
+                }
+            }
+        }
+        if let Ok(out) = Command::new("getprop").arg("ro.product.model").output() {
+            if let Ok(text) = String::from_utf8(out.stdout) {
+                if !text.trim().is_empty() {
+                    info.model = Some(text.trim().to_string());
+                }
+            }
+        }
+    }
+}
+
+fn gather_windows(info: &mut MachineInfo) {
+    if let Ok(out) = Command::new("wmic")
+        .args(["computersystem", "get", "manufacturer,model"])
+        .output()
+    {
+        if let Ok(text) = String::from_utf8(out.stdout) {
+            for line in text.lines().skip(1) {
+                let parts: Vec<_> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    info.manufacturer = Some(parts[0].to_string());
+                    info.model = Some(parts[1..].join(" "));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn main() {
+    let args = Args::parse();
+
+    let sys = System::new_all();
+
+    let mut info = MachineInfo {
+        os_name: System::name(),
+        kernel_version: System::kernel_version(),
+        hostname: System::host_name(),
+        cpu_brand: sys.cpus().first().map(|c| c.brand().to_string()).unwrap_or_default(),
+        cpu_cores: sys.cpus().len(),
+        total_memory: sys.total_memory(),
+        manufacturer: None,
+        model: None,
+    };
+
+    match std::env::consts::OS {
+        "linux" => gather_linux(&mut info),
+        "windows" => gather_windows(&mut info),
+        _ => {}
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&info).unwrap());
+    } else {
+        if let Some(ref name) = info.os_name {
+            print!("OS: {}", name);
+            if let Some(ref ver) = info.kernel_version {
+                print!(" ({})", ver);
+            }
+            println!();
+        }
+        if let Some(ref host) = info.hostname {
+            println!("Hostname: {}", host);
+        }
+        println!("CPU: {} ({} cores)", info.cpu_brand, info.cpu_cores);
+        println!("Total memory: {} KB", info.total_memory);
+        if let Some(ref m) = info.manufacturer {
+            println!("Manufacturer: {}", m);
+        }
+        if let Some(ref m) = info.model {
+            println!("Model: {}", m);
+        }
+    }
+}
+
