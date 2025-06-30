@@ -169,3 +169,13 @@ Responsive hosts not matching IPMI (ICMP ping only):
 # show commands without executing them
 ./update_packages.ers --dry-run
 ```
+
+## machine_details.ers
+
+`machine_details.ers` prints information about the current machine. It combines
+generic data from `sysinfo` with platform specific helpers. Use `--json` to
+output structured data.
+
+```bash
+./machine_details.ers --json
+```
