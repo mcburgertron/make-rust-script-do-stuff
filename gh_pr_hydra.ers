@@ -15,6 +15,9 @@ use std::io::{self, Write};
 #[derive(Parser)]
 #[command(author, version, about = "GitHub PR Hydra Toolkit (rust-script edition)")]
 struct Cli {
+    /// Path to a local git repository
+    #[arg(long)]
+    repo_path: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -51,6 +54,11 @@ enum Commands {
     ReadyDrafts {
         #[arg(long)]
         author: String,
+        #[arg(long, default_value_t = false)]
+        what_if: bool,
+    },
+    /// Remove all remote branches fully merged into the default branch
+    CleanMerged {
         #[arg(long, default_value_t = false)]
         what_if: bool,
     },
@@ -140,6 +148,26 @@ fn remove_branch_safe(branch: &str, repo: &str, what_if: bool) -> Result<(), Box
     match cmd.status() {
         Ok(st) if st.success() => println!("\u{2713} Deleted remote branch '{}'", branch),
         _ => eprintln!("\u{2717} Failed to delete '{}'", branch),
+    }
+    Ok(())
+}
+
+fn list_branches(repo: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut cmd = Command::new("gh");
+    cmd.args(["api", "--paginate", &format!("repos/{}/branches?per_page=100", repo), "-q", ".[].name"]);
+    let out = run_command(&mut cmd)?;
+    Ok(out.lines().map(|s| s.to_string()).collect())
+}
+
+fn clean_merged_branches(repo: &str, what_if: bool) -> Result<(), Box<dyn Error>> {
+    println!("[Clean Merged] Syncing local repository...");
+    let status = Command::new("git").args(["fetch", "--prune"]).status();
+    if status.map(|s| !s.success()).unwrap_or(true) {
+        eprintln!("Warning: 'git fetch --prune' failed");
+    }
+    println!("[Clean Merged] Checking branches...");
+    for branch in list_branches(repo)? {
+        remove_branch_safe(&branch, repo, what_if)?;
     }
     Ok(())
 }
@@ -284,6 +312,14 @@ fn ready_drafts(author: &str, what_if: bool) -> Result<(), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
+    if let Some(path) = cli.repo_path.as_deref() {
+        std::env::set_current_dir(path)
+            .map_err(|e| format!("Failed to change directory to '{}': {e}", path))?;
+        let status = Command::new("git").args(["rev-parse", "--is-inside-work-tree"]).status();
+        if status.map(|s| !s.success()).unwrap_or(true) {
+            return Err(format!("'{}' is not a git repository", path).into());
+        }
+    }
     match cli.command {
         Commands::MergeSerial { author, delete_branch, what_if } => merge_serial(&author, delete_branch, what_if)?,
         Commands::MergeDivination { author } => merge_divination(&author)?,
@@ -293,6 +329,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             remove_branch_safe(&branch, &repo, what_if)?;
         }
         Commands::ReadyDrafts { author, what_if } => ready_drafts(&author, what_if)?,
+        Commands::CleanMerged { what_if } => {
+            let repo = get_repo()?;
+            clean_merged_branches(&repo, what_if)?;
+        }
     }
     Ok(())
 }

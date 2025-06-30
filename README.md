@@ -111,13 +111,22 @@ read:jira-work
 ## gh_pr_hydra.ers
 
 `gh_pr_hydra.ers` offers several GitHub pull request utilities. You can merge PRs
-by author, query mergeability, detect conflicting file changes and mark draft PRs
-ready for review.
+by author, query mergeability, detect conflicting file changes, clean up merged
+branches and mark draft PRs ready for review. Pass `--repo-path` to run the tool
+against a different local repository without changing directories.
 
 ```bash
 ./gh_pr_hydra.ers merge-serial --author <username>
 ./gh_pr_hydra.ers ready-drafts --author <username>
+./gh_pr_hydra.ers clean-merged --what-if
 ```
+
+`remove-branch-safe` deletes a branch only when all of the following hold:
+
+* The branch is not the default branch.
+* The branch is not marked as protected on GitHub.
+* Its latest commit is an ancestor of the default branch, ensuring it was fully
+  merged.
 
 ## ipmi_scan.ers
 
