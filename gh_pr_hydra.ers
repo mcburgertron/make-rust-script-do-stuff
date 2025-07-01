@@ -75,6 +75,30 @@ fn run_command(cmd: &mut Command) -> Result<String, Box<dyn Error>> {
     }
 }
 
+fn ensure_gh_ready() -> Result<(), Box<dyn Error>> {
+    match Command::new("gh").arg("--version").output() {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err("GitHub CLI 'gh' not found. Install it from https://cli.github.com/.".into());
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    let auth = Command::new("gh").args(["auth", "status"]).output()?;
+    if !auth.status.success() {
+        return Err("GitHub CLI is not authenticated. Run `gh auth login` with an account that can access this repository.".into());
+    }
+
+    let repo_check = Command::new("gh").args(["repo", "view"]).output()?;
+    if !repo_check.status.success() {
+        if String::from_utf8_lossy(&repo_check.stderr).contains("HTTP 404") {
+            return Err("Current GitHub account cannot access this repository. Ensure you're logged into the correct account.".into());
+        }
+        return Err(format!("`gh repo view` failed: {}", String::from_utf8_lossy(&repo_check.stderr)).into());
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct BranchInfo {
     #[serde(default)]
@@ -355,6 +379,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err(format!("'{}' is not a git repository", path).into());
         }
     }
+    ensure_gh_ready()?;
     match cli.command {
         Commands::MergeSerial { author, delete_branch, what_if } => merge_serial(&author, delete_branch, what_if)?,
         Commands::MergeDivination { author } => merge_divination(&author)?,

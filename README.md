@@ -115,6 +115,10 @@ by author, query mergeability, detect conflicting file changes, clean up merged
 branches and mark draft PRs ready for review. Pass `--repo-path` to run the tool
 against a different local repository without changing directories.
 
+It depends on the [GitHub CLI](https://cli.github.com/). Make sure `gh` is installed
+and authenticated with an account that can access the repository. Otherwise
+commands like `clean-merged` may emit a stream of 404 errors.
+
 ```bash
 ./gh_pr_hydra.ers merge-serial --author <username>
 ./gh_pr_hydra.ers ready-drafts --author <username>
