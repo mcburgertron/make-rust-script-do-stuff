@@ -89,14 +89,20 @@ fn ensure_gh_ready() -> Result<(), Box<dyn Error>> {
         return Err("GitHub CLI is not authenticated. Run `gh auth login` with an account that can access this repository.".into());
     }
 
-    let repo_check = Command::new("gh").args(["repo", "view"]).output()?;
+    let repo_check = Command::new("gh").args(["repo", "view", "--json", "viewerPermission"]).output()?;
     if !repo_check.status.success() {
         if String::from_utf8_lossy(&repo_check.stderr).contains("HTTP 404") {
             return Err("Current GitHub account cannot access this repository. Ensure you're logged into the correct account.".into());
         }
         return Err(format!("`gh repo view` failed: {}", String::from_utf8_lossy(&repo_check.stderr)).into());
     }
-    Ok(())
+    #[derive(Deserialize)]
+    struct Perm { #[serde(rename = "viewerPermission")] viewer_permission: Option<String> }
+    let perm: Perm = serde_json::from_slice(&repo_check.stdout)?;
+    match perm.viewer_permission.as_deref() {
+        Some("ADMIN") | Some("MAINTAIN") | Some("WRITE") => Ok(()),
+        _ => Err("Current GitHub account lacks push permission to this repository. Ensure you're logged into the correct account.".into()),
+    }
 }
 
 #[derive(Deserialize)]
