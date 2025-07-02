@@ -53,3 +53,18 @@ text. Use the [`url`](https://docs.rs/url) crate to parse and validate URLs, and
 consider libraries like [`regex`](https://docs.rs/regex) or `serde` for more
 complex formats. Proper parsing prevents subtle bugs and makes the code easier
 to maintain.
+
+## Coding standards
+
+All `.ers` files must match the house style demonstrated in **`gh_pr_hydra.ers`**.
+
+1. **Lint gates** - add `#![warn(clippy::all, missing_docs, rust_2018_idioms)]` immediately after the shebang. You may run lints with "rust-script --package <ers>; cargo clippy --manifest-path <path>/Cargo.toml".
+2. **Embedded manifest** - include a `//! \`\`\`cargo` header block pinning `[package]` and `[dependencies]`; use edition 2021.  
+3. **Usage & caveats first** - document `bash,no_run` (and when relevant `powershell,no_run`) examples plus runtime prerequisites _before_ the manifest.  
+4. **CLI via `clap` derive** - define `Cli` with `#[derive(Parser)]`; model subcommands with `#[derive(Subcommand)]`; reference `author, version, about`.  
+5. **Error handling** - adopt `anyhow::Result` everywhere; attach context using `.with_context(...)`.  
+6. **Process wrapper** - route every `std::process::Command` through a `run(&mut Command) -> anyhow::Result<Output>` helper for uniform diagnostics.  
+7. **Environment guard** - validate external dependencies once (e.g. `ensure_ready()`) near the start of `main()`.  
+8. **Internal module** - move implementation details into an `internal` module; expose helpers `pub(crate)` for testability while keeping the public API slim.  
+9. **Unit tests** - embed a `#[cfg(test)]` module with at least one test covering a critical helper or failure path (see `run_reports_missing_binary`).  
+10. **Doctests** - ensure header code-blocks compile under `rust-script test`; treat them as executable documentation.
