@@ -210,8 +210,8 @@ mod internal {
         }
         let mut mb = Command::new("git");
         mb.args(["merge-base", "--is-ancestor", &info.commit.sha, &format!("origin/{}", default)]);
-        let status = mb.status()?;
-        if !status.success() {
+        let out = run(&mut mb)?;
+        if !out.status.success() {
             eprintln!("\u{2022} '{}' is not fully merged into '{}'; skipping.", branch, default);
             return Ok(false);
         }
@@ -228,10 +228,11 @@ mod internal {
         let path = format!("heads/{}", branch);
         let r = encode(&path);
         cmd.args(["api", "-X", "DELETE", &format!("repos/{}/git/refs/{}", repo, r)]);
-        match cmd.status() {
-            Ok(st) if st.success() => println!("\u{2713} Deleted remote branch '{}'", branch),
-            Ok(_) => eprintln!("\u{2717} Failed to delete '{}'", branch),
-            Err(_) => eprintln!("\u{2717} Failed to delete '{}'", branch),
+        let out = run(&mut cmd)?;
+        if out.status.success() {
+            println!("\u{2713} Deleted remote branch '{}'", branch);
+        } else {
+            eprintln!("\u{2717} Failed to delete '{}'", branch);
         }
         Ok(())
     }
@@ -248,16 +249,20 @@ mod internal {
 
     pub(crate) fn clean_merged_branches(repo: &str, what_if: bool) -> Result<()> {
         println!("[Clean Merged] Syncing local repository...");
-        let status = Command::new("git").args(["fetch", "--prune"]).status();
-        if status.map(|s| !s.success()).unwrap_or(true) {
+        let mut fetch = Command::new("git");
+        fetch.args(["fetch", "--prune"]);
+        let out = run(&mut fetch)?;
+        if !out.status.success() {
             eprintln!("Warning: 'git fetch --prune' failed");
         }
         println!("[Clean Merged] Checking branches...");
         for branch in list_branches(repo)? {
             remove_branch_safe(&branch, repo, what_if)?;
         }
-        let status = Command::new("git").args(["fetch", "--prune"]).status();
-        if status.map(|s| !s.success()).unwrap_or(true) {
+        let mut fetch = Command::new("git");
+        fetch.args(["fetch", "--prune"]);
+        let out = run(&mut fetch)?;
+        if !out.status.success() {
             eprintln!("Warning: final 'git fetch --prune' failed");
         }
         Ok(())
@@ -296,14 +301,14 @@ mod internal {
             let mut merge_cmd = Command::new("gh");
             merge_cmd.args(["pr", "merge", &pr_number, "--squash"]);
             if delete_branch { merge_cmd.arg("--delete-branch"); }
-            let result = merge_cmd.output()?;
+            let result = run(&mut merge_cmd)?;
             if result.status.success() {
                 println!("\u{2713} PR #{pr_number} merged.");
                 if delete_branch {
                     let mut check = Command::new("gh");
                     let b = encode(&branch);
                     check.args(["api", &format!("repos/{}/branches/{}", repo, b), "-q", ".name"]);
-                    let branch_exists = check.output()?.status.success();
+                    let branch_exists = run(&mut check)?.status.success();
                     if branch_exists {
                         println!("\u{2022} Remote branch '{}' still exists; performing safety checks…", branch);
                         remove_branch_safe(&branch, &repo, what_if)?;
@@ -408,9 +413,11 @@ mod internal {
             } else {
                 let mut rc = Command::new("gh");
                 rc.args(["pr", "ready", &pr.number.to_string()]);
-                match rc.status() {
-                    Ok(st) if st.success() => println!("  \u{2713} Marked ready"),
-                    _ => eprintln!("  \u{2717} Failed to mark ready"),
+                let out = run(&mut rc)?;
+                if out.status.success() {
+                    println!("  \u{2713} Marked ready");
+                } else {
+                    eprintln!("  \u{2717} Failed to mark ready");
                 }
             }
         }
@@ -424,8 +431,10 @@ fn main() -> Result<()> {
     if let Some(path) = cli.repo_path.as_deref() {
         std::env::set_current_dir(path)
             .with_context(|| format!("Failed to change directory to '{}'", path))?;
-        let status = Command::new("git").args(["rev-parse", "--is-inside-work-tree"]).status();
-        if status.map(|s| !s.success()).unwrap_or(true) {
+        let mut check = Command::new("git");
+        check.args(["rev-parse", "--is-inside-work-tree"]);
+        let out = internal::run(&mut check)?;
+        if !out.status.success() {
             bail!("'{}' is not a git repository", path);
         }
     }
