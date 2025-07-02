@@ -357,7 +357,7 @@ mod internal {
         for pr in &prs {
             println!("Fetching files for PR #{}", pr.number);
             let mut cmd = Command::new("gh");
-            cmd.args(["pr", "view", &pr.number.to_string(), "--json", "files"]);
+            cmd.args(["pr", "view", &pr.number.to_string(), "--json", "number,title,files"]);
             let out = run(&mut cmd)?;
             if !out.status.success() {
                 bail!("`gh pr view` failed: {}", String::from_utf8_lossy(&out.stderr));
