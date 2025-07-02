@@ -1,6 +1,5 @@
 #!/usr/bin/env rust-script
 //! GitHub PR Hydra Toolkit (rust-script edition).
-//! © 2025 mcburgertron <verbprobe@outlook.com>
 //!
 //! ```bash,no_run
 //! $ ./gh_pr_hydra.ers --help
