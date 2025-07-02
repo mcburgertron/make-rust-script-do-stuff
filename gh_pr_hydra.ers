@@ -1,5 +1,6 @@
 #!/usr/bin/env rust-script
 //! GitHub PR Hydra Toolkit (rust-script edition).
+//! © 2025 mcburgertron <verbprobe@outlook.com>
 //!
 //! ```bash,no_run
 //! $ ./gh_pr_hydra.ers --help
@@ -12,11 +13,15 @@
 //! Branch-manipulating commands require push permission to the repository.
 //! Run `gh auth login` if needed before using this tool.
 //!
+//! ## Requirements
+//! - Platforms: Windows, macOS, Linux
+//! - Tools: gh CLI, git
+//!
 //! ```cargo
 //! [package]
 //! name = "gh_pr_hydra"
 //! version = "0.1.0"
-//! authors = ["Example <example@example.com>"]
+//! authors = ["mcburgertron <verbprobe@outlook.com>"]
 //! edition = "2021"
 //!
 //! [dependencies]
