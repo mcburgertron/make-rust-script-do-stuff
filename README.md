@@ -116,7 +116,8 @@ branches and mark draft PRs ready for review. Pass `--repo-path` to run the tool
 against a different local repository without changing directories.
 
 It depends on the [GitHub CLI](https://cli.github.com/). Make sure `gh` is installed
-and authenticated with an account that can access the repository. Otherwise
+and authenticated with an account that can access the repository. Branch-manipulating
+commands require push permission; run `gh auth login` if needed. Otherwise
 commands like `clean-merged` may emit a stream of 404 errors.
 
 ```bash
