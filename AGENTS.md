@@ -69,7 +69,7 @@ All `.ers` files must match the house style demonstrated in **`gh_pr_hydra.ers`*
 9. **Unit tests** - embed a `#[cfg(test)]` module with at least one test covering a critical helper or failure path (see `run_reports_missing_binary`).
 10. **Doctests** - ensure header code-blocks compile under `rust-script test`; treat them as executable documentation.
 
-## Automated lint fixes
+## Linting
 
 Use a throw-away Cargo package to lint scripts while keeping the source in the
 repository pristine. The example below uses **`gh_pr_hydra.ers`**. Because
