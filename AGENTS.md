@@ -68,3 +68,46 @@ All `.ers` files must match the house style demonstrated in **`gh_pr_hydra.ers`*
 8. **Internal module** - move implementation details into an `internal` module; expose helpers `pub(crate)` for testability while keeping the public API slim.
 9. **Unit tests** - embed a `#[cfg(test)]` module with at least one test covering a critical helper or failure path (see `run_reports_missing_binary`).
 10. **Doctests** - ensure header code-blocks compile under `rust-script test`; treat them as executable documentation.
+
+## Automated lint fixes
+
+Use a throw-away Cargo package to lint scripts while keeping the source in the
+repository pristine. The example below uses **`gh_pr_hydra.ers`**. Because
+`cargo clippy --fix` expects sources inside the package, copy the script into
+`src/main.rs` first:
+
+```bash
+###############################################################################
+# 0.  Generate the throw-away Cargo package for the script and capture its path
+###############################################################################
+pkg=$(rust-script --package gh_pr_hydra.ers)
+mkdir -p "$pkg/src"
+cp gh_pr_hydra.ers "$pkg/src/main.rs"
+sed -i 's|path = ".*"|path = "src/main.rs"|' "$pkg/Cargo.toml"
+
+###############################################################################
+# 1.  Automatic fix pass – show every lint as warnings
+###############################################################################
+
+cargo clippy --manifest-path "$pkg/Cargo.toml" --fix --allow-dirty \
+  -- -W clippy::all -W clippy::pedantic -W clippy::nursery
+
+# Inspect the generated file. Keep `pub(crate)` helpers internal and verify
+# imports remain explicit:
+diff -u gh_pr_hydra.ers "$pkg/src/main.rs" | less -R
+
+###############################################################################
+# 2.  Verification pass – now treat any remaining warning as an error
+###############################################################################
+cargo clippy --manifest-path "$pkg/Cargo.toml" --all-targets --all-features \
+  -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery
+
+###############################################################################
+# 3.  Repeat steps 1–2 until the verification pass is clean.
+#     Merge only the changes that respect the coding standards back into
+#     `gh_pr_hydra.ers`.
+###############################################################################
+
+# clean-up when done
+rm -rf "$pkg"
+```
