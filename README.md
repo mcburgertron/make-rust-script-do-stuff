@@ -64,6 +64,12 @@ To obtain the initial authorization code, print the consent URL:
 Open the URL, authorize the app and pass the resulting code via
 `--auth-code` when starting the server.
 
+The Atlassian OAuth configuration typically allows only
+`http://localhost:8080` as the redirect URI. The script defaults to that
+port for both the redirect URI and the token service. Use
+`--redirect-port` if your app permits a different redirect URI and
+`--port` to change the listening port for API calls.
+
 The app requires a Jira OAuth token with the following scopes:
 
 ```
