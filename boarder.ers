@@ -216,6 +216,10 @@ async fn main() -> anyhow::Result<()> {
         renew_tokens(&state, &mut ac).await;
     }
 
+    if state.read().await.token.is_none() {
+        return Ok(());
+    }
+
     let st_clone = state.clone();
     let ac_clone = auth_code_once.clone();
     tokio::spawn(async move {
