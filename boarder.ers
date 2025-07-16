@@ -32,6 +32,12 @@ struct Args {
     /// Print the URL to obtain the initial authorization code and exit
     #[arg(long)]
     print_auth_url: bool,
+    /// Port for the local OAuth redirect URI. Atlassian usually expects
+    /// `http://localhost:8080`, so change this only if your OAuth app
+    /// accepts a different port.
+    #[arg(long, default_value_t = 8080)]
+    redirect_port: u16,
+    /// Port the token service listens on. Use this in API calls.
     #[arg(long, default_value_t = 8080)]
     port: u16,
 }
@@ -194,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config {
         client_id: args.client_id,
         client_secret: args.client_secret,
-        redirect_uri: format!("http://localhost:{}", args.port),
+        redirect_uri: format!("http://localhost:{}", args.redirect_port),
     };
 
     if args.print_auth_url {
