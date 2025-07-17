@@ -70,6 +70,10 @@ port for both the redirect URI and the token service. Use
 `--redirect-port` if your app permits a different redirect URI and
 `--port` to change the listening port for API calls.
 
+If both `--aws-s3-bucket` and `--aws-s3-filename` are provided, the script
+uploads the specified file to the given S3 bucket after every successful token
+refresh. When enabled, tokens refresh every 30 minutes instead of 55 minutes.
+
 The app requires a Jira OAuth token with the following scopes:
 
 ```
