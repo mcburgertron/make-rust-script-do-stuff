@@ -5,7 +5,7 @@
 //! reqwest = { version = "0.11", features = ["json", "blocking", "rustls-tls"] }
 //! serde = { version = "1", features = ["derive"] }
 //! serde_json = "1"
-//! tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs"] }
+//! tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs", "process"] }
 //! hyper = { version = "0.14", features = ["full"] }
 //! anyhow = "1"
 //! chrono = { version = "0.4", features = ["serde"] }
@@ -40,6 +40,12 @@ struct Args {
     /// Port the token service listens on. Use this in API calls.
     #[arg(long, default_value_t = 8080)]
     port: u16,
+    /// S3 bucket for token sync
+    #[arg(long)]
+    aws_s3_bucket: Option<String>,
+    /// Local filename uploaded on token refresh
+    #[arg(long)]
+    aws_s3_filename: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -60,6 +66,13 @@ struct AppState {
     cfg: Config,
     token: Option<TokenInfo>,
     store: PathBuf,
+    s3: Option<S3Config>,
+}
+
+#[derive(Clone)]
+struct S3Config {
+    bucket: String,
+    filename: String,
 }
 
 #[derive(Clone)]
@@ -89,6 +102,55 @@ async fn load_refresh_token(path: &PathBuf) -> Option<String> {
         Ok(s) => Some(s.trim().to_string()),
         Err(_) => None,
     }
+}
+
+async fn ensure_aws_credentials() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use tokio::fs;
+    use std::path::PathBuf;
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let path = PathBuf::from(home).join(".aws/credentials");
+    let data = fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut in_default = false;
+    let mut has_id = false;
+    let mut has_secret = false;
+    for line in data.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            in_default = t == "[default]";
+            continue;
+        }
+        if in_default {
+            if t.starts_with("aws_access_key_id") {
+                has_id = true;
+            } else if t.starts_with("aws_secret_access_key") {
+                has_secret = true;
+            }
+        }
+    }
+    if !has_id || !has_secret {
+        anyhow::bail!("default AWS credentials missing required keys");
+    }
+    Ok(())
+}
+
+async fn sync_s3(cfg: &S3Config) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use tokio::process::Command;
+
+    ensure_aws_credentials().await?;
+    let mut cmd = Command::new("aws");
+    cmd.args(["s3", "cp", &cfg.filename, &format!("s3://{}/", cfg.bucket)]);
+    let out = cmd
+        .output()
+        .await
+        .context("spawning aws")?;
+    if !out.status.success() {
+        anyhow::bail!("aws s3 cp failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    Ok(())
 }
 
 enum Grant {
@@ -154,13 +216,21 @@ async fn renew_tokens(state: &Arc<RwLock<AppState>>, auth_code_once: &mut Option
             if let Err(e) = save_refresh_token(&store, &resp.refresh_token).await {
                 eprintln!("Failed to save refresh token: {e}");
             }
-            let mut st = state.write().await;
-            st.token = Some(TokenInfo {
-                access_token: resp.access_token.clone(),
-                refresh_token: resp.refresh_token.clone(),
-                expires_at,
-            });
+            let s3_cfg = {
+                let mut st = state.write().await;
+                st.token = Some(TokenInfo {
+                    access_token: resp.access_token.clone(),
+                    refresh_token: resp.refresh_token.clone(),
+                    expires_at,
+                });
+                st.s3.clone()
+            };
             eprintln!("Token renewed, expires at {}", expires_at);
+            if let Some(cfg) = s3_cfg {
+                if let Err(e) = sync_s3(&cfg).await {
+                    eprintln!("S3 sync failed: {e:?}");
+                }
+            }
         }
         Err(e) => {
             eprintln!("Token renewal failed: {e:?}");
@@ -207,8 +277,12 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", auth_url(&cfg));
         return Ok(());
     }
+    let s3_cfg = if let (Some(b), Some(f)) = (args.aws_s3_bucket, args.aws_s3_filename) {
+        Some(S3Config { bucket: b, filename: f })
+    } else { None };
+
     let store = PathBuf::from("jira_refresh.token");
-    let state = Arc::new(RwLock::new(AppState { cfg: cfg.clone(), token: None, store: store.clone() }));
+    let state = Arc::new(RwLock::new(AppState { cfg: cfg.clone(), token: None, store: store.clone(), s3: s3_cfg.clone() }));
     let auth_code_once = Arc::new(RwLock::new(args.auth_code));
 
     {
@@ -220,10 +294,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let refresh_secs = if s3_cfg.is_some() { 30 * 60 } else { 55 * 60 };
     let st_clone = state.clone();
     let ac_clone = auth_code_once.clone();
     tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(55 * 60));
+        let mut interval = time::interval(Duration::from_secs(refresh_secs));
         loop {
             interval.tick().await;
             let mut ac = ac_clone.write().await;
