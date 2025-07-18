@@ -87,6 +87,16 @@ struct S3Config {
     key: String,
 }
 
+fn parse_s3_config(bucket: Option<String>, key: Option<String>) -> anyhow::Result<Option<S3Config>> {
+    match (bucket, key) {
+        (Some(b), Some(k)) => Ok(Some(S3Config { bucket: b, key: k })),
+        (None, None) => Ok(None),
+        _ => {
+            anyhow::bail!("--aws-s3-bucket and --aws-s3-key must be used together")
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Config {
     client_id: String,
@@ -349,10 +359,14 @@ async fn handle_req(
                 None => true,
             }
         };
+        eprintln!("/token requested; refresh_needed={refresh_needed}");
+        let mut refreshed = false;
         if refresh_needed {
             let mut ac = auth_code_once.write().await;
             if let Err(e) = renew_tokens(&state, &mut ac).await {
                 eprintln!("Token renewal failed: {e:?}");
+            } else {
+                refreshed = true;
             }
         }
         let st = state.read().await;
@@ -360,9 +374,14 @@ async fn handle_req(
             let body = serde_json::to_string(&serde_json::json!({
                 "access_token": info.access_token,
                 "expires_at": info.expires_at.to_rfc3339(),
+                "refreshed": refreshed,
             }))
             .unwrap();
-            Ok(Response::new(Body::from(body)))
+            let mut res = Response::new(Body::from(body));
+            if refreshed {
+                *res.status_mut() = StatusCode::ACCEPTED;
+            }
+            Ok(res)
         } else {
             let mut res = Response::new(Body::from("unable to obtain tokens"));
             *res.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
@@ -389,11 +408,7 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", auth_url(&cfg));
         return Ok(());
     }
-    let s3_cfg = if let (Some(b), Some(k)) = (args.aws_s3_bucket, args.aws_s3_key) {
-        Some(S3Config { bucket: b, key: k })
-    } else {
-        None
-    };
+    let s3_cfg = parse_s3_config(args.aws_s3_bucket, args.aws_s3_key)?;
 
     if s3_cfg.is_some() {
         ensure_aws_cli().await?;
@@ -479,7 +494,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{auth_url, Config};
+    use super::{auth_url, parse_s3_config, Config};
 
     #[test]
     fn auth_url_contains_client_id() {
@@ -490,5 +505,13 @@ mod tests {
         };
         let url = auth_url(&cfg);
         assert!(url.contains("client_id=id"));
+    }
+
+    #[test]
+    fn parse_s3_config_requires_both_flags() {
+        assert!(parse_s3_config(Some("b".into()), None).is_err());
+        assert!(parse_s3_config(None, Some("k".into())).is_err());
+        assert!(parse_s3_config(None, None).unwrap().is_none());
+        assert!(parse_s3_config(Some("b".into()), Some("k".into())).unwrap().is_some());
     }
 }
