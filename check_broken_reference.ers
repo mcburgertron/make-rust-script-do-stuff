@@ -1,0 +1,86 @@
+#!/usr/bin/env rust-script
+//! Scan https://docs.degirum.com/llms-full.txt for occurrences of `broken-reference`.
+//!
+//! ```bash,no_run
+//! $ ./check_broken_reference.ers
+//! ```
+//!
+//! Network connectivity is required.
+//!
+//! ```cargo
+//! [package]
+//! name = "check_broken_reference"
+//! version = "0.1.0"
+//! edition = "2021"
+//!
+//! [dependencies]
+//! clap = { version = "4", features = ["derive"] }
+//! anyhow = "1"
+//! reqwest = { version = "0.11", features = ["blocking", "rustls-tls"] }
+//! ```
+#![warn(clippy::all, missing_docs, rust_2018_idioms)]
+
+use anyhow::{bail, Context, Result};
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(author, version, about)]
+struct Cli {}
+
+#[allow(clippy::redundant_pub_crate)]
+mod internal {
+    use super::{bail, Context, Result};
+
+    pub(crate) const URL: &str = "https://docs.degirum.com/llms-full.txt";
+
+    pub(crate) fn ensure_ready() -> Result<()> {
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .head(URL)
+            .send()
+            .with_context(|| format!("HEAD {}", URL))?;
+        if !resp.status().is_success() {
+            bail!("HEAD request failed with status {}", resp.status());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn fetch_file() -> Result<String> {
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .get(URL)
+            .send()
+            .with_context(|| format!("GET {}", URL))?;
+        let text = resp.text().with_context(|| format!("read body from {}", URL))?;
+        Ok(text)
+    }
+
+    pub(crate) fn count_occurrences(text: &str) -> usize {
+        text.matches("broken-reference").count()
+    }
+}
+
+fn main() -> Result<()> {
+    let _cli = Cli::parse();
+    internal::ensure_ready()?;
+    let text = internal::fetch_file()?;
+    let count = internal::count_occurrences(&text);
+    if count == 0 {
+        println!("No 'broken-reference' entries found.");
+    } else {
+        println!("{count} 'broken-reference' entries found.");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::internal::count_occurrences;
+
+    #[test]
+    fn count_occurrences_detects_matches() {
+        let sample = "good\nbroken-reference\nnope\nbroken-reference";
+        assert_eq!(count_occurrences(sample), 2);
+    }
+}
+
