@@ -1,13 +1,25 @@
 #!/usr/bin/env rust-script
+//! Ping a range of IPs on the local network.
+//!
+//! ```bash,no_run
+//! $ ./subnet_ping_seeker.ers --help
+//! ```
+//!
 //! ```cargo
 //! [dependencies]
 //! clap = { version = "4", features = ["derive"] }
-//! tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
+//! tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "net", "time"] }
 //! anyhow = "1"
 //! ```
+#![warn(clippy::all, missing_docs, rust_2018_idioms)]
 
 use clap::Parser;
-use tokio::{process::Command, task::JoinSet};
+use tokio::{
+    net::TcpStream,
+    process::Command,
+    task::JoinSet,
+    time::{timeout, Duration},
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Ping a range of IPs on the local network in a cross-platform manner")]
@@ -27,6 +39,10 @@ struct Args {
     /// Number of concurrent pings (default: 32)
     #[arg(long, default_value_t = 32)]
     workers: usize,
+
+    /// Ports to scan after pinging (e.g., "22 80")
+    #[arg(long, value_delimiter = ' ')]
+    ports: Vec<u16>,
 }
 
 async fn ping(ip: String) -> Option<String> {
@@ -63,6 +79,27 @@ async fn ping(ip: String) -> Option<String> {
     }
 }
 
+async fn tcp_probe(ip: &str, port: u16) -> bool {
+    match timeout(Duration::from_secs(1), TcpStream::connect((ip, port))).await {
+        Ok(Ok(_)) => true,
+        _ => false,
+    }
+}
+
+async fn scan_ports(ip: String, ports: Vec<u16>) -> Option<(String, Vec<u16>)> {
+    let mut open = Vec::new();
+    for port in ports {
+        if tcp_probe(&ip, port).await {
+            open.push(port);
+        }
+    }
+    if open.is_empty() {
+        None
+    } else {
+        Some((ip, open))
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -94,6 +131,26 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let mut open_hosts = Vec::new();
+    if !args.ports.is_empty() && !responding.is_empty() {
+        let mut scan_tasks = JoinSet::new();
+        for ip in &responding {
+            if scan_tasks.len() >= args.workers {
+                if let Some(res) = scan_tasks.join_next().await {
+                    if let Ok(Some(p)) = res {
+                        open_hosts.push(p);
+                    }
+                }
+            }
+            scan_tasks.spawn(scan_ports(ip.clone(), args.ports.clone()));
+        }
+        while let Some(res) = scan_tasks.join_next().await {
+            if let Ok(Some(p)) = res {
+                open_hosts.push(p);
+            }
+        }
+    }
+
     if !responding.is_empty() {
         println!("Responding IPs:");
         responding.sort_by(|a, b| {
@@ -101,12 +158,29 @@ async fn main() -> anyhow::Result<()> {
             let b_num = b.rsplit('.').next().unwrap_or("0").parse::<u8>().unwrap_or(0);
             a_num.cmp(&b_num)
         });
-        for ip in responding {
+        for ip in &responding {
             println!("{}", ip);
+        }
+        if !open_hosts.is_empty() {
+            println!("\nOpen ports:");
+            for (ip, ports) in &open_hosts {
+                let list = ports.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+                println!("{ip}: {list}");
+            }
         }
     } else {
         println!("No responding IPs found.");
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tcp_probe;
+
+    #[tokio::test]
+    async fn tcp_probe_fails_for_invalid_port() {
+        assert!(!tcp_probe("127.0.0.1", 0).await);
+    }
 }
