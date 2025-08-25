@@ -199,16 +199,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     let is_json = resp_headers
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.contains("application/json"))
+        .map(|ct| {
+            let ct = ct.to_ascii_lowercase();
+            ct.contains("application/json") || ct.contains("+json") || ct.ends_with("/json")
+        })
         .unwrap_or(false);
 
     if is_json {
         let json: Value = resp.json()?;
         serde_json::to_writer_pretty(&mut out, &json)?;
         writeln!(out)?; // final newline
+    } else if args.out_file.is_some() {
+        // Stream raw bytes to the file to preserve binary content
+        let mut writer = out;
+        let mut resp = resp;
+        let _n = resp.copy_to(&mut writer)?;
     } else {
-        let text = resp.text()?;
-        write!(out, "{}", text)?;
+        // No outfile: write response body to stdout as bytes
+        let bytes = resp.bytes()?;
+        out.write_all(&bytes)?;
     }
 
     if args.dump_headers || args.verbose {
@@ -220,4 +229,3 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
-
