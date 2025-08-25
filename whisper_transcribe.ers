@@ -5,11 +5,13 @@
 //! reqwest = { version = "0.11", features = ["json", "blocking", "multipart", "rustls-tls"] }
 //! anyhow = "1"
 //! serde_json = "1"
+//! mime_guess = "2"
 //! ```
 
 use clap::Parser;
 use serde_json::Value;
 use std::{fs::File, io::Read, path::PathBuf, time::Instant};
+use mime_guess::MimeGuess;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Transcribe audio using OpenAI Whisper")] 
@@ -29,7 +31,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let start = Instant::now();
 
-    let buf = if (args.speed - 1.0).abs() > f32::EPSILON {
+    let (buf, file_name, content_type) = if (args.speed - 1.0).abs() > f32::EPSILON {
         let output = std::process::Command::new("ffmpeg")
             .args(["-i", &args.path])
             .args(["-filter:a", &format!("atempo={}", args.speed)])
@@ -38,20 +40,21 @@ fn main() -> anyhow::Result<()> {
         if !output.status.success() {
             anyhow::bail!("ffmpeg failed with status {}", output.status);
         }
-        output.stdout
+        (output.stdout, PathBuf::from(&args.path).file_name().unwrap().to_string_lossy().to_string(), "audio/wav".to_string())
     } else {
         let mut file = File::open(&args.path)?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
-        buf
+        // Infer MIME from file extension; default to octet-stream
+        let ct = MimeGuess::from_path(&args.path).first_or_octet_stream().essence_str().to_string();
+        (buf, PathBuf::from(&args.path).file_name().unwrap().to_string_lossy().to_string(), ct)
     };
 
+    // Use multipart; for speed==1.0 we could stream the file, but we already have bytes available
     let part = reqwest::blocking::multipart::Part::bytes(buf)
-        .file_name(PathBuf::from(&args.path).file_name().unwrap().to_string_lossy().to_string())
-        .mime_str("audio/wav")?;
-    let form = reqwest::blocking::multipart::Form::new()
-        .part("file", part)
-        .text("model", "whisper-1");
+        .file_name(file_name)
+        .mime_str(&content_type)?;
+    let form = reqwest::blocking::multipart::Form::new().part("file", part).text("model", "whisper-1");
 
     let client = reqwest::blocking::Client::new();
     let resp = client
