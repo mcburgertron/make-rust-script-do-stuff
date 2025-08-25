@@ -111,12 +111,12 @@ read:jira-work
 ./whisper_transcribe.ers --apikey <key> --path audio.wav
 ```
 
-## subnet_ping_seekers.ers
+## subnet_ping_seeker.ers
 
-`subnet_ping_seekers.ers` pings a range of addresses on a subnet and lists those that respond. Pass `--ports` to also scan for open ports on each responding host.
+`subnet_ping_seeker.ers` pings a range of addresses on a subnet and lists those that respond. Pass `--ports` to also scan for open ports on each responding host.
 
 ```bash
-./subnet_ping_seekers.ers --subnet 192.168.1 --start 1 --end 20 --ports 22 80
+./subnet_ping_seeker.ers --subnet 192.168.1 --start 1 --end 20 --ports 22 80
 ```
 
 ## gh_pr_hydra.ers
