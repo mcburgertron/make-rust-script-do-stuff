@@ -58,13 +58,7 @@ fn update(dry_run: bool) -> Result<()> {
     let os = std::env::consts::OS;
     match os {
         "linux" | "android" => {
-            // Detect Termux regardless of target OS string (proot may report linux)
-            if is_termux_env() {
-                run_command("pkg", &["update"], dry_run)?;
-                return run_command("pkg", &["upgrade", "-y"], dry_run);
-            }
-
-            // Detect a common Linux package manager
+            // Prefer system package managers when available, then fallback to Termux.
             if has_cmd("apt-get") {
                 return run_command(
                     "sudo",
@@ -90,6 +84,11 @@ fn update(dry_run: bool) -> Result<()> {
             if has_cmd("zypper") {
                 run_command("sudo", &["zypper", "refresh"], dry_run)?;
                 return run_command("sudo", &["zypper", "update", "-y"], dry_run);
+            }
+            // Termux (only when system managers are not present)
+            if is_termux_env() {
+                run_command("pkg", &["update"], dry_run)?;
+                return run_command("pkg", &["upgrade", "-y"], dry_run);
             }
             bail!("could not detect supported Linux package manager (apt, dnf, yum, pacman, zypper)");
         }
