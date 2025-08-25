@@ -41,9 +41,9 @@ struct Args {
     #[arg(long, default_value = ".")]
     path: PathBuf,
 
-    /// Maximum recursion depth (unlimited by default)
-    #[arg(long, default_value_t = usize::MAX)]
-    depth: usize,
+    /// Maximum recursion depth (unlimited when omitted)
+    #[arg(long)]
+    depth: Option<usize>,
 
     /// Glob pattern filter
     #[arg(long)]
@@ -64,19 +64,24 @@ struct Entry {
     is_dir: bool,
 }
 
-fn build_glob(pattern: &Option<String>) -> Option<GlobSet> {
-    pattern.as_ref().map(|pat| {
-        let glob = Glob::new(pat).expect("invalid glob pattern");
+fn build_glob(pattern: &Option<String>) -> Result<Option<GlobSet>, Box<dyn std::error::Error>> {
+    if let Some(pat) = pattern.as_ref() {
+        let glob = Glob::new(pat)?;
         let mut builder = globset::GlobSetBuilder::new();
         builder.add(glob);
-        builder.build().expect("failed to build glob")
-    })
+        let set = builder.build()?;
+        Ok(Some(set))
+    } else {
+        Ok(None)
+    }
 }
 
-fn build_regex(pattern: &Option<String>) -> Option<Regex> {
-    pattern
-        .as_ref()
-        .map(|pat| Regex::new(pat).expect("invalid regex pattern"))
+fn build_regex(pattern: &Option<String>) -> Result<Option<Regex>, Box<dyn std::error::Error>> {
+    if let Some(pat) = pattern.as_ref() {
+        Ok(Some(Regex::new(pat)?))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(unix)]
@@ -97,11 +102,24 @@ fn is_hidden(entry: &DirEntry) -> bool {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let glob = build_glob(&args.filter);
-    let regex = build_regex(&args.regex);
+    let glob = build_glob(&args.filter)?;
+    let regex = build_regex(&args.regex)?;
     let mut items = Vec::new();
 
-    for entry in WalkDir::new(&args.path).max_depth(args.depth) {
+    let mut walker = WalkDir::new(&args.path);
+    if let Some(d) = args.depth { walker = walker.max_depth(d); }
+
+    let iter = if args.hidden {
+        walker.into_iter().collect::<Vec<_>>()
+    } else {
+        // Prune hidden directories to avoid listing their children
+        walker
+            .into_iter()
+            .filter_entry(|e| !(e.file_type().is_dir() && is_hidden(e)))
+            .collect::<Vec<_>>()
+    };
+
+    for entry in iter {
         let entry = match entry {
             Ok(e) => e,
             Err(err) => {
@@ -136,4 +154,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", json);
     Ok(())
 }
-
