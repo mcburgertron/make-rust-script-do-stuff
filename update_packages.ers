@@ -8,6 +8,8 @@
 use std::process::Command;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use std::env;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(author, version, about = "Update system packages using the platform's package manager")]
@@ -32,24 +34,64 @@ fn run_command(cmd: &str, args: &[&str], dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+fn is_termux_env() -> bool {
+    env::var("PREFIX").map_or(false, |p| p.contains("com.termux"))
+        || std::fs::metadata("/data/data/com.termux/files").is_ok()
+}
+
+fn has_cmd(cmd: &str) -> bool {
+    if cmd.contains('/') { return std::path::Path::new(cmd).exists(); }
+    if let Ok(path) = env::var("PATH") {
+        for p in path.split(':') {
+            let mut pb = PathBuf::from(p);
+            pb.push(cmd);
+            if cfg!(windows) {
+                if pb.with_extension("exe").exists() { return true; }
+            }
+            if pb.exists() { return true; }
+        }
+    }
+    false
+}
+
 fn update(dry_run: bool) -> Result<()> {
     let os = std::env::consts::OS;
     match os {
-        "linux" => {
-            run_command(
-                "sudo",
-                &[
-                    "sh",
-                    "-c",
-                    "apt-get update && apt-get upgrade -y && apt-get autoremove -y",
-                ],
-                dry_run,
-            )
-        }
-        "android" => {
-            // Termux package management
-            run_command("pkg", &["update"], dry_run)?;
-            run_command("pkg", &["upgrade", "-y"], dry_run)
+        "linux" | "android" => {
+            // Detect Termux regardless of target OS string (proot may report linux)
+            if is_termux_env() {
+                run_command("pkg", &["update"], dry_run)?;
+                return run_command("pkg", &["upgrade", "-y"], dry_run);
+            }
+
+            // Detect a common Linux package manager
+            if has_cmd("apt-get") {
+                return run_command(
+                    "sudo",
+                    &[
+                        "sh",
+                        "-c",
+                        "apt-get update && apt-get upgrade -y && apt-get autoremove -y",
+                    ],
+                    dry_run,
+                );
+            }
+            if has_cmd("dnf") {
+                run_command("sudo", &["dnf", "upgrade", "-y"], dry_run)?;
+                return run_command("sudo", &["dnf", "autoremove", "-y"], dry_run);
+            }
+            if has_cmd("yum") {
+                run_command("sudo", &["yum", "update", "-y"], dry_run)?;
+                return run_command("sudo", &["yum", "autoremove", "-y"], dry_run);
+            }
+            if has_cmd("pacman") {
+                return run_command("sudo", &["pacman", "-Syu", "--noconfirm"], dry_run);
+            }
+            if has_cmd("zypper") {
+                run_command("sudo", &["zypper", "refresh"], dry_run)?;
+                return run_command("sudo", &["zypper", "update", "-y"], dry_run);
+            }
+            bail!("could not detect supported Linux package manager (apt, dnf, yum, pacman, zypper)");
         }
         "macos" => {
             run_command("brew", &["update"], dry_run)?;
@@ -76,4 +118,3 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     update(cli.dry_run)
 }
-
