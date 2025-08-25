@@ -114,6 +114,19 @@ mod internal {
         #[allow(clippy::items_after_statements)]
         #[derive(Deserialize)]
         struct Perm { #[serde(rename = "viewerPermission")] viewer_permission: Option<String> }
+        let _perm: Perm = serde_json::from_slice(&output.stdout)?;
+        Ok(())
+    }
+
+    pub(crate) fn ensure_push_permission() -> Result<()> {
+        let mut cmd = Command::new("gh");
+        cmd.args(["repo", "view", "--json", "viewerPermission"]);
+        let output = run(&mut cmd)?;
+        if !output.status.success() {
+            bail!("`gh repo view` failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        #[derive(Deserialize)]
+        struct Perm { #[serde(rename = "viewerPermission")] viewer_permission: Option<String> }
         let perm: Perm = serde_json::from_slice(&output.stdout)?;
         match perm.viewer_permission.as_deref() {
             Some("ADMIN" | "MAINTAIN" | "WRITE") => Ok(()),
@@ -445,15 +458,23 @@ fn main() -> Result<()> {
     }
     internal::ensure_gh_ready()?;
     match cli.command {
-        Commands::MergeSerial { author, delete_branch, what_if } => internal::merge_serial(&author, delete_branch, what_if)?,
+        Commands::MergeSerial { author, delete_branch, what_if } => {
+            internal::ensure_push_permission()?;
+            internal::merge_serial(&author, delete_branch, what_if)?
+        }
         Commands::MergeDivination { author } => internal::merge_divination(&author)?,
         Commands::MergeConflicts { author } => internal::merge_conflicts(&author)?,
         Commands::RemoveBranchSafe { branch, what_if } => {
+            internal::ensure_push_permission()?;
             let repo = internal::get_repo()?;
             internal::remove_branch_safe(&branch, &repo, what_if)?;
         }
-        Commands::ReadyDrafts { author, what_if } => internal::ready_drafts(&author, what_if)?,
+        Commands::ReadyDrafts { author, what_if } => {
+            internal::ensure_push_permission()?;
+            internal::ready_drafts(&author, what_if)?
+        }
         Commands::CleanMerged { what_if } => {
+            internal::ensure_push_permission()?;
             let repo = internal::get_repo()?;
             internal::clean_merged_branches(&repo, what_if)?;
         }
@@ -472,4 +493,3 @@ mod tests {
         assert!(err.to_string().contains("spawning"));
     }
 }
-
