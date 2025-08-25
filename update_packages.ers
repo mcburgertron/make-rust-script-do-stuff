@@ -60,30 +60,45 @@ fn update(dry_run: bool) -> Result<()> {
         "linux" | "android" => {
             // Prefer system package managers when available, then fallback to Termux.
             if has_cmd("apt-get") {
-                return run_command(
-                    "sudo",
-                    &[
-                        "sh",
-                        "-c",
-                        "apt-get update && apt-get upgrade -y && apt-get autoremove -y",
-                    ],
-                    dry_run,
-                );
+                let args = [
+                    "sh",
+                    "-c",
+                    "apt-get update && apt-get upgrade -y && apt-get autoremove -y",
+                ];
+                if has_cmd("sudo") { run_command("sudo", &args, dry_run) } else { run_command("sh", &args[1..], dry_run) }?
+                ;
+                return Ok(());
             }
             if has_cmd("dnf") {
-                run_command("sudo", &["dnf", "upgrade", "-y"], dry_run)?;
-                return run_command("sudo", &["dnf", "autoremove", "-y"], dry_run);
+                if has_cmd("sudo") {
+                    run_command("sudo", &["dnf", "upgrade", "-y"], dry_run)?;
+                    return run_command("sudo", &["dnf", "autoremove", "-y"], dry_run);
+                } else {
+                    run_command("dnf", &["upgrade", "-y"], dry_run)?;
+                    return run_command("dnf", &["autoremove", "-y"], dry_run);
+                }
             }
             if has_cmd("yum") {
-                run_command("sudo", &["yum", "update", "-y"], dry_run)?;
-                return run_command("sudo", &["yum", "autoremove", "-y"], dry_run);
+                if has_cmd("sudo") {
+                    run_command("sudo", &["yum", "update", "-y"], dry_run)?;
+                    return run_command("sudo", &["yum", "autoremove", "-y"], dry_run);
+                } else {
+                    run_command("yum", &["update", "-y"], dry_run)?;
+                    return run_command("yum", &["autoremove", "-y"], dry_run);
+                }
             }
             if has_cmd("pacman") {
-                return run_command("sudo", &["pacman", "-Syu", "--noconfirm"], dry_run);
+                if has_cmd("sudo") { return run_command("sudo", &["pacman", "-Syu", "--noconfirm"], dry_run); }
+                return run_command("pacman", &["-Syu", "--noconfirm"], dry_run);
             }
             if has_cmd("zypper") {
-                run_command("sudo", &["zypper", "refresh"], dry_run)?;
-                return run_command("sudo", &["zypper", "update", "-y"], dry_run);
+                if has_cmd("sudo") {
+                    run_command("sudo", &["zypper", "refresh"], dry_run)?;
+                    return run_command("sudo", &["zypper", "update", "-y"], dry_run);
+                } else {
+                    run_command("zypper", &["refresh"], dry_run)?;
+                    return run_command("zypper", &["update", "-y"], dry_run);
+                }
             }
             // Termux (only when system managers are not present)
             if is_termux_env() {
