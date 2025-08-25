@@ -189,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if !possible.is_empty() {
-        println!("\nPossible IPMI devices (responded to UDP/623):");
+        println!("\nPossible IPMI devices (responded on IPMI ports 623/664 via UDP/TCP):");
         possible.sort();
         for ip in &possible {
             println!("  {}", ip);
