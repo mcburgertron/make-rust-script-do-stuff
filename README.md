@@ -70,6 +70,16 @@ port for both the redirect URI and the token service. Use
 `--redirect-port` if your app permits a different redirect URI and
 `--port` to change the listening port for API calls.
 
+Scopes
+- By default, the consent URL includes these scopes:
+  `offline_access read:jira-user manage:jira-configuration manage:jira-project manage:jira-webhook write:jira-work read:jira-work read:jql:jira validate:jql:jira`.
+- You can override or extend scopes using `--scope` (repeatable) or a comma-delimited list, for example:
+  `./boarder.ers --client-id <id> --client-secret <secret> --scope read:jira-user --scope read:jira-work,read:jql:jira --print-auth-url`
+- When scopes change in your integration:
+  - Update the scopes in the developer console (your OAuth app) to allow them.
+  - Regenerate the consent URL (e.g., `--print-auth-url`) so the user re-consents with the new scopes.
+  - Old refresh tokens may not include newly added scopes; re-authorize once to mint a new refresh token.
+
 If both `--aws-s3-bucket` and `--aws-s3-key` are provided, the script uploads a
 JSON object containing the current access token and refresh token to the given
 S3 bucket after every successful token refresh. When enabled, tokens refresh

@@ -15,6 +15,7 @@
 //! hyper = { version = "0.14", features = ["full"] }
 //! anyhow = "1"
 //! chrono = { version = "0.4", features = ["serde"] }
+//! urlencoding = "2"
 //! ```
 #![warn(clippy::all, missing_docs, rust_2018_idioms)]
 
@@ -39,6 +40,10 @@ struct Args {
     client_id: String,
     #[arg(long)]
     client_secret: String,
+    /// Optional scopes for the consent URL. Repeat --scope or pass a comma-delimited list.
+    /// If omitted, a sensible default set is used (see README).
+    #[arg(long = "scope", value_delimiter = ',')]
+    scopes: Vec<String>,
     #[arg(long)]
     auth_code: Option<String>,
     /// Print the URL to obtain the initial authorization code and exit
@@ -63,14 +68,17 @@ struct Args {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TokenInfo {
     access_token: String,
-    refresh_token: String,
+    // Some providers (including Atlassian on refresh) omit this field.
+    refresh_token: Option<String>,
     expires_at: DateTime<Utc>,
 }
 
 #[derive(Deserialize)]
 struct TokenResp {
     access_token: String,
-    refresh_token: String,
+    // Optional on refresh responses or when offline_access was not granted.
+    #[serde(default)]
+    refresh_token: Option<String>,
     expires_in: i64,
 }
 
@@ -102,14 +110,48 @@ struct Config {
     client_id: String,
     client_secret: String,
     redirect_uri: String,
+    scopes: Vec<String>,
+}
+
+fn default_scopes() -> Vec<String> {
+    // Default scopes cover common Jira operations, enhanced JQL, and Jira Software board APIs.
+    // Adjust via --scope flags if your app requires a different set.
+    vec![
+        // Refresh without user interaction
+        "offline_access".into(),
+
+        // Enhanced JQL
+        "read:jql:jira".into(),
+        "validate:jql:jira".into(),
+
+        // Jira Software board scopes
+        "read:board-scope.admin:jira-software".into(),
+        "write:board-scope:jira-software".into(),
+        "read:board-scope:jira-software".into(),
+
+        // Core Jira read/write and management scopes
+        "read:jira-work".into(),
+        "write:jira-work".into(),
+        "read:jira-user".into(),
+        "manage:jira-project".into(),
+        "manage:jira-configuration".into(),
+        "manage:jira-webhook".into(),
+    ]
 }
 
 fn auth_url(cfg: &Config) -> String {
+    let scopes = if cfg.scopes.is_empty() {
+        default_scopes()
+    } else {
+        cfg.scopes.clone()
+    };
+    let scope_joined = scopes.join(" ");
+    let scope_encoded = urlencoding::encode(&scope_joined);
     format!(
-        "https://auth.atlassian.com/authorize?audience=api.atlassian.com&client_id={}\
-&scope=offline_access%20read%3Ajira-user%20manage%3Ajira-configuration%20manage%3Ajira-project%20manage%3Ajira-webhook%20write%3Ajira-work%20read%3Ajira-work&redirect_uri={}\
+        "https://auth.atlassian.com/authorize?audience=api.atlassian.com&client_id={}&scope={}\
+&redirect_uri={}\
 &state=some_state&response_type=code&prompt=consent",
-        cfg.client_id, cfg.redirect_uri
+        cfg.client_id, scope_encoded, cfg.redirect_uri
     )
 }
 
@@ -292,8 +334,8 @@ async fn renew_tokens(
         (st.cfg.clone(), st.token.clone(), st.store.clone(), st.s3.clone())
     };
 
-    let refresh_opt = if let Some(tok) = token_opt {
-        Some(tok.refresh_token)
+    let refresh_opt = if let Some(tok) = token_opt.as_ref() {
+        tok.refresh_token.clone()
     } else if let Some(path) = &store {
         load_refresh_token_local(path).await
     } else if let Some(cfg) = &s3_cfg {
@@ -305,10 +347,11 @@ async fn renew_tokens(
         None
     };
 
-    let grant = if let Some(ref_token) = refresh_opt {
-        Grant::Refresh(ref_token)
-    } else if let Some(code) = auth_code_once.take() {
+    // Prefer an explicit --auth-code when provided, even if a local refresh token exists.
+    let grant = if let Some(code) = auth_code_once.take() {
         Grant::AuthCode(code)
+    } else if let Some(ref_token) = refresh_opt {
+        Grant::Refresh(ref_token)
     } else {
         eprintln!(
             "First run needs --auth-code. Open this URL to obtain it:\n{}",
@@ -320,23 +363,34 @@ async fn renew_tokens(
     match request_new_tokens(&cfg, grant).await {
         Ok(resp) => {
             let expires_at = Utc::now() + ChronoDuration::seconds(resp.expires_in);
-            if let Some(ref path) = store {
-                save_refresh_token(path, &resp.refresh_token)
+            if let (Some(ref path), Some(ref rtok)) = (&store, &resp.refresh_token) {
+                save_refresh_token(path, rtok)
                     .await
                     .with_context(|| format!("saving {}", path.display()))?;
             }
             let s3_cfg = {
                 let mut st = state.write().await;
+                // Preserve prior refresh token if the response omitted one
+                let merged_refresh = resp
+                    .refresh_token
+                    .clone()
+                    .or_else(|| token_opt.as_ref().and_then(|t| t.refresh_token.clone()));
                 st.token = Some(TokenInfo {
                     access_token: resp.access_token.clone(),
-                    refresh_token: resp.refresh_token.clone(),
+                    refresh_token: merged_refresh.clone(),
                     expires_at,
                 });
                 st.s3.clone()
             };
             eprintln!("Token renewed, expires at {}", expires_at);
-            if let Some(cfg) = s3_cfg {
-                sync_s3(&cfg, &resp.access_token, &resp.refresh_token).await?;
+            if resp.refresh_token.is_none() && token_opt.as_ref().and_then(|t| t.refresh_token.clone()).is_none() {
+                eprintln!(
+                    "Note: server did not return a refresh_token. \
+If you need automatic renewal, obtain consent with the 'offline_access' scope (use --print-auth-url)."
+                );
+            }
+            if let (Some(cfg), Some(ref rt)) = (s3_cfg, resp.refresh_token.as_deref()) {
+                sync_s3(&cfg, &resp.access_token, rt).await?;
             }
         }
         Err(e) => {
@@ -402,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
         client_id: args.client_id,
         client_secret: args.client_secret,
         redirect_uri: format!("http://localhost:{}", args.redirect_port),
+        scopes: args.scopes,
     };
 
     if args.print_auth_url {
@@ -430,7 +485,7 @@ async fn main() -> anyhow::Result<()> {
             let mut st = state.write().await;
             st.token = Some(TokenInfo {
                 access_token: tok.access_token,
-                refresh_token: tok.refresh_token,
+                refresh_token: Some(tok.refresh_token),
                 expires_at: Utc::now(),
             });
         }
@@ -494,7 +549,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{auth_url, parse_s3_config, Config};
+    use super::{auth_url, default_scopes, parse_s3_config, Config};
 
     #[test]
     fn auth_url_contains_client_id() {
@@ -502,9 +557,24 @@ mod tests {
             client_id: "id".into(),
             client_secret: "secret".into(),
             redirect_uri: "http://localhost:8080".into(),
+            scopes: vec![],
         };
         let url = auth_url(&cfg);
         assert!(url.contains("client_id=id"));
+    }
+
+    #[test]
+    fn auth_url_includes_default_scopes() {
+        let cfg = Config {
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+            redirect_uri: "http://localhost:8080".into(),
+            scopes: vec![],
+        };
+        let url = auth_url(&cfg);
+        for s in default_scopes() {
+            assert!(url.contains(&s.replace(":", "%3A")) || url.contains(&s));
+        }
     }
 
     #[test]
