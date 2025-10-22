@@ -7,20 +7,25 @@
 //! dialoguer = "0.11"
 //! dirs = "5"
 //! serde = { version = "1", features = ["derive"] }
+//! tempfile = "3"
 //! toml = "0.8"
 //! ```
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use atty::Stream;
 use clap::{Parser, Subcommand};
-use dialoguer::{Input, Select};
+use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::Write as IoWrite;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use tempfile::NamedTempFile;
 
 const CONFIG_DIR_NAME: &str = ".make-rust-script-do-stuff";
 const CONFIG_FILE_NAME: &str = "z-git-tools.toml";
@@ -32,7 +37,7 @@ struct Cli {
     #[arg(long)]
     dry_run: bool,
 
-    /// Skip GitHub CLI account switching
+    /// Skip GitHub token usage
     #[arg(long)]
     no_gh: bool,
 
@@ -48,7 +53,7 @@ struct Cli {
     command: CommandKind,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone, Copy)]
 enum CommandKind {
     #[command(name = "status")]
     Status,
@@ -78,15 +83,21 @@ struct RepoConfig {
     skip: bool,
 }
 
+#[derive(Clone)]
 struct RepoEntry {
     name: String,
     path: PathBuf,
 }
 
-enum FetchOutcome {
-    Completed,
-    Skipped,
-    Failed,
+#[derive(Clone)]
+struct RepoTask {
+    entry: RepoEntry,
+    account: Option<String>,
+}
+
+#[derive(Debug)]
+struct JobResultOutput {
+    output: String,
 }
 
 struct AppContext {
@@ -157,15 +168,13 @@ impl AppContext {
         self.config_dirty = true;
     }
 
-    fn assign_account(&mut self, repo: &RepoEntry, account: &str) -> Result<()> {
-        {
-            let cfg = self.repo_config_mut(&repo.name);
-            cfg.account = Some(account.to_string());
-            cfg.skip = false;
-        }
+    fn assign_account(&mut self, repo: &RepoEntry, account: &str) {
+        let cfg = self.repo_config_mut(&repo.name);
+        cfg.account = Some(account.to_string());
+        cfg.skip = false;
         self.add_known_account(account);
         self.config_dirty = true;
-        Ok(())
+        println!("[config] {} assigned account '{}'.", repo.name, account);
     }
 
     fn ensure_saved(&mut self) -> Result<()> {
@@ -206,13 +215,6 @@ impl AppContext {
             return Ok(false);
         }
 
-        match self.prompt_assign_account(repo)? {
-            Some(_) => Ok(true),
-            None => Ok(false),
-        }
-    }
-
-    fn prompt_assign_account(&mut self, repo: &RepoEntry) -> Result<Option<String>> {
         println!("[prompt] No GitHub account configured for {}.", repo.name);
         if !self.config.known_accounts.is_empty() {
             println!(
@@ -226,197 +228,267 @@ impl AppContext {
                 "Enter GitHub account for {} ('skip' to ignore)",
                 repo.name
             );
-            let value: String = if let Some(default) = self.config.known_accounts.first() {
-                Input::new()
-                    .with_prompt(prompt_text.clone())
-                    .default(default.clone())
-                    .interact_text()?
-            } else {
-                Input::new()
-                    .with_prompt(prompt_text.clone())
-                    .interact_text()?
-            };
+            let value: String = Input::new()
+                .with_prompt(prompt_text.clone())
+                .interact_text()?;
             let trimmed = value.trim();
             if trimmed.eq_ignore_ascii_case("skip") || trimmed.is_empty() {
                 self.mark_repo_skip(&repo.name, true);
                 println!();
-                return Ok(None);
+                return Ok(false);
             }
 
-            self.assign_account(repo, trimmed)?;
-            println!("[config] {} assigned account '{}'.", repo.name, trimmed);
+            self.assign_account(repo, trimmed);
             println!();
-            return Ok(Some(trimmed.to_string()));
+            return Ok(true);
         }
-    }
-
-    fn maybe_switch_account(&self, repo: &RepoEntry) -> Result<()> {
-        let Some(account) = self.repo_account(&repo.name) else {
-            return Ok(());
-        };
-
-        if self.is_repo_skipped(&repo.name) {
-            return Ok(());
-        }
-
-        if self.no_gh {
-            println!("[skip gh] {} (override: {})", repo.name, account);
-            return Ok(());
-        }
-
-        println!("[gh] switching to account '{}' for {}", account, repo.name);
-        if self.dry_run {
-            println!(
-                "DRY: gh auth switch -h github.com --user '{}'",
-                account
-            );
-            return Ok(());
-        }
-
-        let status = Command::new("gh")
-            .args(["auth", "switch", "-h", "github.com", "--user", account])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        match status {
-            Ok(s) if s.success() => Ok(()),
-            Ok(_) => {
-                eprintln!(
-                    "[warn] gh auth switch failed for account '{}' (repo {})",
-                    account, repo.name
-                );
-                Ok(())
-            }
-            Err(err) => {
-                eprintln!(
-                    "[warn] Failed to invoke gh auth switch for account '{}' (repo {}): {}",
-                    account, repo.name, err
-                );
-                Ok(())
-            }
-        }
-    }
-
-    fn get_remote_url(&self, repo: &RepoEntry) -> Option<String> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&repo.path)
-            .args(["remote", "get-url", "origin"])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
-    }
-
-    fn perform_fetch(&mut self, repo: &RepoEntry, prune: bool) -> Result<FetchOutcome> {
-        if self.dry_run {
-            print!("DRY: git -C {} fetch", repo.path.display());
-            if prune {
-                print!(" --prune");
-            }
-            println!();
-            return Ok(FetchOutcome::Completed);
-        }
-
-        let args = if prune {
-            vec!["fetch", "--prune"]
-        } else {
-            vec!["fetch"]
-        };
-
-        loop {
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(&repo.path)
-                .args(&args)
-                .status();
-
-            match status {
-                Ok(s) if s.success() => return Ok(FetchOutcome::Completed),
-                Ok(s) => {
-                    eprintln!(
-                        "[warn] git fetch exited with status {} in {}",
-                        s.code().unwrap_or(-1),
-                        repo.name
-                    );
-                }
-                Err(err) => {
-                    eprintln!("[warn] git fetch failed in {}: {}", repo.name, err);
-                }
-            }
-
-            if !self.interactive {
-                eprintln!(
-                    "       Update the remote or edit {} to mark the repo as skipped.",
-                    self.config_path.display()
-                );
-                return Ok(FetchOutcome::Failed);
-            }
-
-            match self.prompt_fetch_failure(repo)? {
-                FetchDecision::AssignAccount => {
-                    if self.prompt_assign_account(repo)?.is_none() {
-                        return Ok(FetchOutcome::Skipped);
-                    }
-                }
-                FetchDecision::Skip => {
-                    self.mark_repo_skip(&repo.name, true);
-                    return Ok(FetchOutcome::Skipped);
-                }
-                FetchDecision::Retry => continue,
-                FetchDecision::Ignore => return Ok(FetchOutcome::Failed),
-            }
-        }
-    }
-
-    fn prompt_fetch_failure(&self, repo: &RepoEntry) -> Result<FetchDecision> {
-        let remote = self
-            .get_remote_url(repo)
-            .unwrap_or_else(|| String::from("<unknown>"));
-        println!(
-            "[warn] git fetch failed in {} (remote: {}).",
-            repo.name, remote
-        );
-
-        let options = vec![
-            "Assign or update GitHub account",
-            "Mark repo as skipped",
-            "Retry fetch",
-            "Ignore for now",
-        ];
-
-        let selection = Select::new()
-            .with_prompt("Select option")
-            .items(&options)
-            .default(2)
-            .interact()?;
-
-        let decision = match selection {
-            0 => FetchDecision::AssignAccount,
-            1 => FetchDecision::Skip,
-            2 => FetchDecision::Retry,
-            _ => FetchDecision::Ignore,
-        };
-
-        Ok(decision)
     }
 }
 
-enum FetchDecision {
-    AssignAccount,
-    Skip,
-    Retry,
-    Ignore,
+struct RunnerContext {
+    dry_run: bool,
+    no_gh: bool,
+    token_cache: Mutex<HashMap<String, Option<String>>>,
+}
+
+impl RunnerContext {
+    fn new(dry_run: bool, no_gh: bool) -> Self {
+        Self {
+            dry_run,
+            no_gh,
+            token_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn token_for(&self, account: &str) -> Result<Option<String>> {
+        if self.no_gh {
+            return Ok(None);
+        }
+        {
+            let cache = self.token_cache.lock().unwrap();
+            if let Some(value) = cache.get(account) {
+                return Ok(value.clone());
+            }
+        }
+
+        let output = Command::new("gh")
+            .args(["auth", "token", "-h", "github.com", "--user", account])
+            .output();
+
+        let token = match output {
+            Ok(out) if out.status.success() => {
+                let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            }
+            Ok(_) => None,
+            Err(_) => None,
+        };
+
+        let mut cache = self.token_cache.lock().unwrap();
+        cache.insert(account.to_string(), token.clone());
+        Ok(token)
+    }
+
+    fn git_command(&self, task: &RepoTask, args: &[&str]) -> Result<Output> {
+        if self.dry_run {
+            return Err(anyhow!("dry-run"));
+        }
+
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&task.entry.path);
+        cmd.arg("-c").arg("credential.helper=");
+        cmd.args(args);
+
+        let mut askpass = None;
+
+        if let Some(account) = task.account.as_deref() {
+            if let Some(token) = self.token_for(account)? {
+                let mut file = NamedTempFile::new().context("creating askpass script")?;
+                file.write_all(
+                    b"#!/usr/bin/env bash\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"${GH_ASKPASS_USERNAME}\" ;;\n  *Password*) printf '%s\\n' \"${GH_ASKPASS_PASSWORD}\" ;;\n  *) printf '\\n' ;;\nesac\n",
+                )
+                .context("writing askpass script")?;
+                let mut perms = file.as_file().metadata()?.permissions();
+                perms.set_mode(0o700);
+                file.as_file().set_permissions(perms)?;
+                cmd.env("GIT_TERMINAL_PROMPT", "0");
+                cmd.env("GIT_ASKPASS", file.path());
+                cmd.env("GH_ASKPASS_USERNAME", "x-access-token");
+                cmd.env("GH_ASKPASS_PASSWORD", token);
+                askpass = Some(file);
+            }
+        }
+
+        let output = cmd.output().with_context(|| {
+            format!(
+                "executing git {} in {}",
+                args.join(" "),
+                task.entry.name
+            )
+        });
+
+        drop(askpass);
+        output
+    }
+}
+
+fn run_jobs_parallel<F>(ctx: Arc<RunnerContext>, tasks: Vec<RepoTask>, job: F) -> Result<()>
+where
+    F: Fn(&RunnerContext, &RepoTask) -> Result<JobResultOutput> + Send + Sync + 'static,
+{
+    let job = Arc::new(job);
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    let mut slots: Vec<Option<Result<JobResultOutput>>> = Vec::with_capacity(tasks.len());
+    slots.resize_with(tasks.len(), || None);
+    let results: Arc<Mutex<Vec<Option<Result<JobResultOutput>>>>> = Arc::new(Mutex::new(slots));
+
+    thread::scope(|scope| {
+        for (idx, task) in tasks.into_iter().enumerate() {
+            let ctx = ctx.clone();
+            let results = results.clone();
+            let job = job.clone();
+            scope.spawn(move || {
+                let res = job(&ctx, &task);
+                results.lock().unwrap()[idx] = Some(res);
+            });
+        }
+    });
+
+    let results = Arc::try_unwrap(results)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+
+    for res in results {
+        match res {
+            Some(Ok(job)) => {
+                print!("{}", job.output);
+            }
+            Some(Err(err)) => {
+                eprintln!("[warn] {}", err);
+            }
+            None => {
+                eprintln!("[warn] missing job result");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn job_status(ctx: &RunnerContext, task: &RepoTask) -> Result<JobResultOutput> {
+    let mut output = String::new();
+    output.push_str(&format!("==> {}\n", task.entry.name));
+
+    if ctx.dry_run {
+        output.push_str(&format!(
+            "DRY: git -C {} status -sb\n\n",
+            task.entry.path.display()
+        ));
+        return Ok(JobResultOutput { output });
+    }
+
+    let cmd_output = ctx.git_command(task, &["status", "-sb"])?;
+    output.push_str(&String::from_utf8_lossy(&cmd_output.stdout));
+    if !cmd_output.stderr.is_empty() {
+        output.push_str(&String::from_utf8_lossy(&cmd_output.stderr));
+    }
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    if !cmd_output.status.success() {
+        output.push_str(&format!("[warn] git status failed in {}\n\n", task.entry.name));
+    } else {
+        output.push('\n');
+    }
+
+    Ok(JobResultOutput { output })
+}
+
+fn job_pull(ctx: &RunnerContext, task: &RepoTask) -> Result<JobResultOutput> {
+    let mut output = String::new();
+    output.push_str(&format!("==> {}\n", task.entry.name));
+
+    if ctx.dry_run {
+        output.push_str(&format!(
+            "DRY: git -C {} status -sb\nDRY: git -C {} pull --ff-only\n\n",
+            task.entry.path.display(),
+            task.entry.path.display()
+        ));
+        return Ok(JobResultOutput { output });
+    }
+
+    let status_out = ctx.git_command(task, &["status", "-sb"])?;
+    output.push_str(&String::from_utf8_lossy(&status_out.stdout));
+    if !status_out.stderr.is_empty() {
+        output.push_str(&String::from_utf8_lossy(&status_out.stderr));
+    }
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    let pull_out = ctx.git_command(task, &["pull", "--ff-only"])?;
+    output.push_str(&String::from_utf8_lossy(&pull_out.stdout));
+    if !pull_out.stderr.is_empty() {
+        output.push_str(&String::from_utf8_lossy(&pull_out.stderr));
+    }
+
+    if !(status_out.status.success() && pull_out.status.success()) {
+        output.push_str(&format!("[warn] git pull failed in {}\n", task.entry.name));
+    }
+
+    output.push('\n');
+    Ok(JobResultOutput { output })
+}
+
+fn job_fetch_status(ctx: &RunnerContext, task: &RepoTask, prune: bool) -> Result<JobResultOutput> {
+    let mut output = String::new();
+    output.push_str(&format!("==> {}\n", task.entry.name));
+
+    if ctx.dry_run {
+        output.push_str(&format!(
+            "DRY: git -C {} fetch{}\nDRY: git -C {} status -sb\n\n",
+            task.entry.path.display(),
+            if prune { " --prune" } else { "" },
+            task.entry.path.display()
+        ));
+        return Ok(JobResultOutput { output });
+    }
+
+    let fetch_args = if prune { vec!["fetch", "--prune"] } else { vec!["fetch"] };
+    let fetch_out = ctx.git_command(task, &fetch_args)?;
+    output.push_str(&String::from_utf8_lossy(&fetch_out.stdout));
+    if !fetch_out.stderr.is_empty() {
+        output.push_str(&String::from_utf8_lossy(&fetch_out.stderr));
+    }
+
+    if !fetch_out.status.success() {
+        output.push_str(&format!(
+            "[warn] git fetch failed in {}\n",
+            task.entry.name
+        ));
+    }
+
+    let status_out = ctx.git_command(task, &["status", "-sb"])?;
+    output.push_str(&String::from_utf8_lossy(&status_out.stdout));
+    if !status_out.stderr.is_empty() {
+        output.push_str(&String::from_utf8_lossy(&status_out.stderr));
+    }
+
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push('\n');
+
+    Ok(JobResultOutput { output })
 }
 
 fn resolve_root(root_arg: Option<&Path>) -> Result<PathBuf> {
@@ -462,111 +534,6 @@ fn list_child_repos(base: &Path) -> Result<Vec<RepoEntry>> {
     Ok(repos)
 }
 
-fn run_git_status(ctx: &AppContext, repo: &RepoEntry) -> Result<()> {
-    println!("==> {}", repo.name);
-    if ctx.dry_run {
-        println!(
-            "DRY: git -C {} status -sb",
-            repo.path.display()
-        );
-        println!();
-        return Ok(());
-    }
-
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(&repo.path)
-        .args(["status", "-sb"])
-        .status()
-        .with_context(|| format!("git status in {}", repo.name))?;
-
-    if !status.success() {
-        eprintln!("[warn] git status failed in {}", repo.name);
-    }
-
-    println!();
-    Ok(())
-}
-
-fn run_git_pull(ctx: &AppContext, repo: &RepoEntry) -> Result<()> {
-    println!("==> {}", repo.name);
-    if ctx.dry_run {
-        println!(
-            "DRY: git -C {} status -sb",
-            repo.path.display()
-        );
-        println!(
-            "DRY: git -C {} pull --ff-only",
-            repo.path.display()
-        );
-        println!();
-        return Ok(());
-    }
-
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(&repo.path)
-        .args(["status", "-sb"])
-        .status()
-        .with_context(|| format!("git status in {}", repo.name))?;
-
-    if !status.success() {
-        eprintln!("[warn] git status failed in {}", repo.name);
-    }
-
-    let pull = Command::new("git")
-        .arg("-C")
-        .arg(&repo.path)
-        .args(["pull", "--ff-only"])
-        .status()
-        .with_context(|| format!("git pull in {}", repo.name))?;
-
-    if !pull.success() {
-        eprintln!("[warn] git pull failed in {}", repo.name);
-    }
-
-    println!();
-    Ok(())
-}
-
-fn run_fetch_status(ctx: &mut AppContext, repo: &RepoEntry, prune: bool) -> Result<()> {
-    println!("==> {}", repo.name);
-
-    match ctx.perform_fetch(repo, prune)? {
-        FetchOutcome::Skipped => {
-            println!();
-            return Ok(());
-        }
-        FetchOutcome::Failed => {
-            eprintln!("[warn] Proceeding without successful fetch for {}", repo.name);
-        }
-        FetchOutcome::Completed => {}
-    }
-
-    if ctx.dry_run {
-        println!(
-            "DRY: git -C {} status -sb",
-            repo.path.display()
-        );
-        println!();
-        return Ok(());
-    }
-
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(&repo.path)
-        .args(["status", "-sb"])
-        .status()
-        .with_context(|| format!("git status in {}", repo.name))?;
-
-    if !status.success() {
-        eprintln!("[warn] git status failed in {}", repo.name);
-    }
-
-    println!();
-    Ok(())
-}
-
 fn default_config_path(cli_override: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = cli_override {
         return Ok(path);
@@ -588,19 +555,20 @@ fn load_config(path: &Path) -> Result<Config> {
     }
 }
 
-fn handle_repos<F>(ctx: &mut AppContext, repos: Vec<RepoEntry>, mut action: F) -> Result<()>
-where
-    F: FnMut(&mut AppContext, &RepoEntry) -> Result<()>,
-{
+fn gather_tasks(ctx: &mut AppContext, repos: Vec<RepoEntry>) -> Result<Vec<RepoTask>> {
+    let mut tasks = Vec::new();
+
     for repo in repos {
         if !ctx.ensure_repo_account(&repo)? {
             continue;
         }
-        ctx.maybe_switch_account(&repo)?;
-        action(ctx, &repo)?;
+        let account = ctx
+            .repo_account(&repo.name)
+            .map(|s| s.to_string());
+        tasks.push(RepoTask { entry: repo, account });
     }
-    println!("All done.");
-    Ok(())
+
+    Ok(tasks)
 }
 
 fn main() -> Result<()> {
@@ -612,17 +580,10 @@ fn main() -> Result<()> {
     let repo_root = resolve_root(cli.root.as_deref())?;
     let mut repos = list_child_repos(&repo_root)?;
 
-    match cli.command {
-        CommandKind::Status => {
-            handle_repos(&mut ctx, repos, |ctx, repo| run_git_status(ctx, repo))?;
-        }
-        CommandKind::Pull => {
-            handle_repos(&mut ctx, repos, |ctx, repo| run_git_pull(ctx, repo))?;
-        }
-        CommandKind::FetchStatus {
-            include_current,
-            no_prune,
-        } => {
+    let tasks = match cli.command {
+        CommandKind::Status => gather_tasks(&mut ctx, repos)?,
+        CommandKind::Pull => gather_tasks(&mut ctx, repos)?,
+        CommandKind::FetchStatus { include_current, .. } => {
             if include_current && repo_root.join(".git").is_dir() {
                 let current = RepoEntry {
                     name: repo_root
@@ -633,11 +594,28 @@ fn main() -> Result<()> {
                 };
                 repos.insert(0, current);
             }
+            gather_tasks(&mut ctx, repos)?
+        }
+    };
 
+    let runner = Arc::new(RunnerContext::new(ctx.dry_run, ctx.no_gh));
+
+    match cli.command {
+        CommandKind::Status => {
+            run_jobs_parallel(runner, tasks, |runner_ctx, task| job_status(runner_ctx, task))?;
+        }
+        CommandKind::Pull => {
+            run_jobs_parallel(runner, tasks, |runner_ctx, task| job_pull(runner_ctx, task))?;
+        }
+        CommandKind::FetchStatus { no_prune, .. } => {
             let prune = !no_prune;
-            handle_repos(&mut ctx, repos, |ctx, repo| run_fetch_status(ctx, repo, prune))?;
+            run_jobs_parallel(runner, tasks, move |runner_ctx, task| {
+                job_fetch_status(runner_ctx, task, prune)
+            })?;
         }
     }
+
+    println!("All done.");
 
     ctx.ensure_saved()?;
     Ok(())
