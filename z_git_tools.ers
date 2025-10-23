@@ -354,8 +354,10 @@ where
             let ctx = ctx.clone();
             let results = results.clone();
             let job = job.clone();
+            let repo_name = task.entry.name.clone();
             scope.spawn(move || {
                 let res = job(&ctx, &task);
+                eprintln!("[done] {}", repo_name);
                 results.lock().unwrap()[idx] = Some(res);
             });
         }
