@@ -1,0 +1,361 @@
+#!/usr/bin/env rust-script
+//! Patch and install the Codex aarch64 glibc helper for proot (prctl stub).
+//!
+//! ```bash,no_run
+//! # Dry run in /tmp (no install)
+//! ./codex_glibc_helper_patch_install.ers --test
+//!
+//! # Install a specific release (requires write access to /usr/local/bin)
+//! sudo ./codex_glibc_helper_patch_install.ers --tag rust-v0.63.0
+//! ```
+//!
+//! Requirements:
+//! - Platform: Linux on aarch64
+//! - Tools: objdump, network access to GitHub releases
+//! - Permissions: install writes to `/usr/local/bin/codex.bin.real`; test mode needs no privileges
+//! - Behavior: expects the raw helper to fail with `prctl(PR_SET_DUMPABLE, 0)` under proot; patches the PLT stub to `mov w0, wzr; ret; nop; nop`
+//!
+//! ```cargo
+//! [package]
+//! name = "codex_glibc_helper_patch_install"
+//! version = "0.1.0"
+//! authors = ["mcburgertron <verbprobe@outlook.com>"]
+//! edition = "2021"
+//!
+//! [dependencies]
+//! anyhow = "1"
+//! clap = { version = "4", features = ["derive"] }
+//! reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+//! serde = { version = "1", features = ["derive"] }
+//! sha2 = "0.10"
+//! hex = "0.4"
+//! tar = "0.4"
+//! flate2 = "1"
+//! tempfile = "3"
+//! chrono = { version = "0.4", default-features = false, features = ["clock"] }
+//! ```
+
+#![warn(clippy::all, missing_docs, rust_2018_idioms)]
+
+use anyhow::{anyhow, bail, Result};
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Patch and install Codex glibc helper for proot")]
+struct Cli {
+    /// Test mode: run end-to-end in /tmp, do not install
+    #[arg(long)]
+    test: bool,
+    /// Override release tag (e.g., rust-v0.61.0); defaults to latest
+    #[arg(long)]
+    tag: Option<String>,
+    /// Allow skipping checksum verification if the release lacks a digest
+    #[arg(long, default_value_t = false)]
+    allow_unsigned: bool,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    internal::ensure_ready(&cli)?;
+    internal::update(&cli)
+}
+
+#[allow(clippy::module_name_repetitions)]
+mod internal {
+    use super::{anyhow, bail, Cli, Result};
+    use anyhow::Context;
+    use chrono::Local;
+    use flate2::read::GzDecoder;
+    use reqwest::blocking::Client;
+    use serde::Deserialize;
+    use sha2::{Digest, Sha256};
+    use std::fs::{self, OpenOptions, Permissions};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+    use tar::Archive;
+    use tempfile::tempdir;
+
+    #[derive(Deserialize)]
+    pub(crate) struct Release {
+        tag_name: String,
+        assets: Vec<Asset>,
+    }
+
+    #[derive(Deserialize)]
+    pub(crate) struct Asset {
+        name: String,
+        digest: Option<String>,
+    }
+
+    const TARBALL: &str = "codex-aarch64-unknown-linux-gnu.tar.gz";
+    const PATCHED_BYTES: &str = "e0031f2ac0035fd61f2003d51f2003d5";
+    const TARGET: &str = "/usr/local/bin/codex.bin.real";
+
+    pub(crate) fn ensure_ready(cli: &Cli) -> Result<()> {
+        if std::env::consts::ARCH != "aarch64" {
+            bail!("This script supports only aarch64");
+        }
+        which("objdump")?;
+        if !cli.test {
+            // Basic writability check for /usr/local/bin
+            let meta = fs::metadata("/usr/local/bin")
+                .context("checking /usr/local/bin metadata")?;
+            let mode = meta.permissions().mode();
+            let writable = mode & 0o222 != 0;
+            if !writable {
+                bail!("Need write access to /usr/local/bin (try sudo or adjust permissions)");
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn update(cli: &Cli) -> Result<()> {
+        let client = Client::builder()
+            .user_agent("codex-local-updater")
+            .build()?;
+
+        let rel = fetch_release(&client, cli.tag.as_deref())?;
+        let tag = rel.tag_name.clone();
+        let version = tag.strip_prefix("rust-v").unwrap_or(&tag);
+        let sha = rel
+            .assets
+            .iter()
+            .find(|a| a.name == TARBALL)
+            .and_then(|a| a.digest.as_ref())
+            .map(|d| d.splitn(2, ':').nth(1).unwrap_or(d).to_string());
+
+        println!("Release: {tag} (version {version})");
+        let url = format!(
+            "https://github.com/openai/codex/releases/download/{tag}/{TARBALL}"
+        );
+        println!("Downloading {url}");
+
+        let bytes = client
+            .get(&url)
+            .send()
+            .context("downloading tarball")?
+            .error_for_status()
+            .context("tarball download failed")?
+            .bytes()
+            .context("reading tarball bytes")?;
+
+        if let Some(expected_sha) = sha {
+            let got_sha = sha256_hex(&bytes);
+            if got_sha != expected_sha {
+                bail!("checksum mismatch: expected {expected_sha}, got {got_sha}");
+            }
+            println!("Checksum verified: {expected_sha}");
+        } else if !cli.allow_unsigned {
+            bail!("Release did not expose a digest; rerun with --allow-unsigned to proceed without checksum verification");
+        } else {
+            println!("Warning: no digest found; proceeding unsigned (--allow-unsigned)");
+        }
+
+        let tmpdir = tempdir().context("creating tempdir")?;
+        let tar_path = tmpdir.path().join(TARBALL);
+        fs::write(&tar_path, &bytes)?;
+
+        // Extract tarball
+        let file = fs::File::open(&tar_path)?;
+        let gz = GzDecoder::new(file);
+        let mut archive = Archive::new(gz);
+        archive.unpack(tmpdir.path())?;
+        let bin_path = tmpdir.path().join("codex-aarch64-unknown-linux-gnu");
+        if !bin_path.exists() {
+            bail!("extracted binary not found at {:?}", bin_path);
+        }
+
+        // Step 2: raw --version (expect prctl failure)
+        match run_version(&bin_path) {
+            Ok(ver) => {
+                println!("Raw binary unexpectedly succeeded: {ver}");
+                println!("Stopping without changes.");
+                return Ok(());
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                if msg.contains("prctl(PR_SET_DUMPABLE") {
+                    println!("Expected prctl failure observed; proceeding to patch.");
+                } else {
+                    println!("Unexpected failure: {msg}");
+                    println!("Stopping without changes.");
+                    return Ok(());
+                }
+            }
+        }
+
+        let offset = find_prctl_offset(&bin_path)?;
+        let cur_bytes = read_bytes(&bin_path, offset)?;
+        println!(
+            "prctl@plt offset: 0x{:x}, bytes: {}",
+            offset,
+            hex::encode(&cur_bytes)
+        );
+
+        let patched = hex::decode(PATCHED_BYTES)?;
+        if cur_bytes == patched {
+            println!("Already patched; skipping patch step.");
+        } else {
+            write_bytes(&bin_path, offset, &patched)?;
+            println!("Patched prctl stub at 0x{:x}", offset);
+        }
+
+        // Verify patched binary runs
+        let ver = run_version(&bin_path)?;
+        println!("Patched binary reports: {ver}");
+
+        if cli.test {
+            println!(
+                "Test mode complete; patched binary left at {}",
+                bin_path.display()
+            );
+            return Ok(());
+        }
+
+        // Install to target
+        let target = PathBuf::from(TARGET);
+        let backup = if target.exists() {
+            let b = target.with_extension(format!(
+                "bak-{}",
+                Local::now().format("%Y%m%d%H%M%S")
+            ));
+            fs::copy(&target, &b).with_context(|| format!("backing up {:?}", target))?;
+            println!("Backup saved to {}", b.display());
+            Some(b)
+        } else {
+            None
+        };
+
+        fs::copy(&bin_path, &target).with_context(|| format!("installing to {:?}", target))?;
+        fs::set_permissions(&target, Permissions::from_mode(0o755))?;
+        println!("Installed patched helper to {}", target.display());
+
+        match run_codex_wrapper() {
+            Ok(v) => {
+                println!("codex --version: {v}");
+                if let Some(b) = backup {
+                    println!("Previous helper backup: {}", b.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("codex --version failed after install: {e}");
+                if let Some(b) = backup {
+                    eprintln!("Restoring backup from {}", b.display());
+                    fs::copy(&b, &target).context("restoring backup")?;
+                }
+                bail!("Install failed; backup restored");
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn find_prctl_offset(bin: &Path) -> Result<u64> {
+        let output = run(Command::new("objdump").arg("-d").arg(bin))?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        parse_prctl_offset(&text)
+    }
+
+    pub(crate) fn parse_prctl_offset(disasm: &str) -> Result<u64> {
+        for line in disasm.lines() {
+            if line.contains("<prctl@plt>") {
+                let addr = line
+                    .split_whitespace()
+                    .next()
+                    .ok_or_else(|| anyhow!("bad objdump line: {line}"))?;
+                let trimmed = addr.trim_start_matches("0x");
+                let offset = u64::from_str_radix(trimmed, 16)
+                    .with_context(|| format!("parsing address {addr}"))?;
+                return Ok(offset);
+            }
+        }
+        bail!("prctl@plt not found");
+    }
+
+    pub(crate) fn read_bytes(bin: &Path, offset: u64) -> Result<Vec<u8>> {
+        let mut f = fs::File::open(bin)?;
+        let mut buf = [0u8; 16];
+        f.seek(SeekFrom::Start(offset))?;
+        f.read_exact(&mut buf)?;
+        Ok(buf.to_vec())
+    }
+
+    pub(crate) fn write_bytes(bin: &Path, offset: u64, data: &[u8]) -> Result<()> {
+        let mut f = OpenOptions::new().write(true).read(true).open(bin)?;
+        f.seek(SeekFrom::Start(offset))?;
+        f.write_all(data)?;
+        Ok(())
+    }
+
+    pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hex::encode(hasher.finalize())
+    }
+
+    pub(crate) fn run_version(bin: &Path) -> Result<String> {
+        let output = run(Command::new(bin).arg("--version"))?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    fn run_codex_wrapper() -> Result<String> {
+        let output = run(Command::new("codex").arg("--version"))?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    pub(crate) fn fetch_release(client: &Client, tag: Option<&str>) -> Result<Release> {
+        let url = if let Some(t) = tag {
+            format!("https://api.github.com/repos/openai/codex/releases/tags/{t}")
+        } else {
+            "https://api.github.com/repos/openai/codex/releases/latest".to_string()
+        };
+        client
+            .get(url)
+            .send()
+            .context("fetching release")?
+            .error_for_status()
+            .context("release request failed")?
+            .json()
+            .context("parsing release JSON")
+    }
+
+    pub(crate) fn which(bin: &str) -> Result<PathBuf> {
+        let output = run(Command::new("which").arg(bin))?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            bail!("{} not found in PATH", bin);
+        }
+        Ok(PathBuf::from(path))
+    }
+
+    pub(crate) fn run(cmd: &mut Command) -> Result<Output> {
+        let printable = format!("{:?}", cmd);
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to run {printable}"))?;
+        if !output.status.success() {
+            bail!(
+                "{} exited with status {:?}: stdout: {} stderr: {}",
+                printable,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::internal::parse_prctl_offset;
+
+    #[test]
+    fn parses_prctl_offset() {
+        let sample = "00000000001e7370 <prctl@plt>:\n  stuff";
+        let offset = parse_prctl_offset(sample).unwrap();
+        assert_eq!(offset, 0x1e7370);
+    }
+}

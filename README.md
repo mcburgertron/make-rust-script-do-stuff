@@ -206,3 +206,17 @@ available. Use `--json` to output structured data.
 ```bash
 ./machine_details.ers --json
 ```
+
+## codex_glibc_helper_patch_install.ers
+
+`codex_glibc_helper_patch_install.ers` fetches the Codex aarch64 glibc helper, verifies the checksum when available, confirms the expected `prctl(PR_SET_DUMPABLE, 0)` failure under proot, patches the `prctl@plt` stub to return success, and installs the helper to `/usr/local/bin/codex.bin.real` with backup/rollback. It requires Linux on aarch64, `objdump`, and write access to `/usr/local/bin` (install step only).
+
+```bash
+# Dry run (no install); leaves patched helper in /tmp
+./codex_glibc_helper_patch_install.ers --test
+
+# Install a specific tag (requires write access)
+sudo ./codex_glibc_helper_patch_install.ers --tag rust-v0.63.0
+```
+
+Pass `--allow-unsigned` if the GitHub release omits a digest. See `docs/codex_glibc_helper_patch_install.md` for the full workflow, backup/restore steps, and post-install verification.
